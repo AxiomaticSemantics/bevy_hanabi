@@ -1,8 +1,9 @@
 #import bevy_render::view::View
 #import bevy_hanabi::vfx_common::{
-    DispatchIndirect, ForceFieldSource, IndirectBuffer, SimParams, Spawner,
+    DispatchIndirect, IndirectBuffer, SimParams, Spawner,
     seed, tau, pcg_hash, to_float01, frand, frand2, frand3, frand4,
-    rand_uniform, proj
+    rand_uniform_f, rand_uniform_vec2, rand_uniform_vec3, rand_uniform_vec4,
+    rand_normal_f, rand_normal_vec2, rand_normal_vec3, rand_normal_vec4, proj
 }
 
 struct Particle {
@@ -16,7 +17,7 @@ struct ParticleBuffer {
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
-#ifdef PARTICLE_TEXTURE
+#ifdef NEEDS_UV
     @location(1) uv: vec2<f32>,
 #endif
 }
@@ -29,17 +30,10 @@ struct VertexOutput {
 #ifdef RENDER_NEEDS_SPAWNER
 @group(1) @binding(3) var<storage, read> spawner : Spawner; // NOTE - same group as update
 #endif
-#ifdef PARTICLE_TEXTURE
-@group(2) @binding(0) var particle_texture: texture_2d<f32>;
-@group(2) @binding(1) var particle_sampler: sampler;
-#endif
-// #ifdef PARTICLE_GRADIENTS
-// @group(3) @binding(0) var gradient_texture: texture_2d<f32>;
-// @group(3) @binding(1) var gradient_sampler: sampler;
-// #endif
+{{MATERIAL_BINDINGS}}
 
 fn get_camera_position_effect_space() -> vec3<f32> {
-    let view_pos = view.view[3].xyz;
+    let view_pos = view.world_from_view[3].xyz;
 #ifdef LOCAL_SPACE_SIMULATION
     let inverse_transform = transpose(
         mat3x3(
@@ -55,7 +49,7 @@ fn get_camera_position_effect_space() -> vec3<f32> {
 }
 
 fn get_camera_rotation_effect_space() -> mat3x3<f32> {
-    let view_rot = mat3x3(view.view[0].xyz, view.view[1].xyz, view.view[2].xyz);
+    let view_rot = mat3x3(view.world_from_view[0].xyz, view.world_from_view[1].xyz, view.world_from_view[2].xyz);
 #ifdef LOCAL_SPACE_SIMULATION
     let inverse_transform = transpose(
         mat3x3(
@@ -102,7 +96,7 @@ fn transform_position_simulation_to_world(sim_position: vec3<f32>) -> vec4<f32> 
 /// The clip space is the final [-1:1]^3 space output from the vertex shader, before
 /// perspective divide and viewport transform are applied.
 fn transform_position_simulation_to_clip(sim_position: vec3<f32>) -> vec4<f32> {
-    return view.view_proj * transform_position_simulation_to_world(sim_position);
+    return view.clip_from_world * transform_position_simulation_to_world(sim_position);
 }
 
 {{RENDER_EXTRA}}
@@ -111,7 +105,7 @@ fn transform_position_simulation_to_clip(sim_position: vec3<f32>) -> vec4<f32> {
 fn vertex(
     @builtin(instance_index) instance_index: u32,
     @location(0) vertex_position: vec3<f32>,
-#ifdef PARTICLE_TEXTURE
+#ifdef NEEDS_UV
     @location(1) vertex_uv: vec2<f32>,
 #endif
     // @location(1) vertex_color: u32,
@@ -121,7 +115,7 @@ fn vertex(
     let index = indirect_buffer.indices[3u * instance_index + pong];
     var particle = particle_buffer.particles[index];
     var out: VertexOutput;
-#ifdef PARTICLE_TEXTURE
+#ifdef NEEDS_UV
     var uv = vertex_uv;
 #ifdef FLIPBOOK
     let row_count = {{FLIPBOOK_ROW_COUNT}};
@@ -129,29 +123,34 @@ fn vertex(
     uv = (ij + uv) * {{FLIPBOOK_SCALE}};
 #endif
     out.uv = uv;
-#endif
+#endif  // NEEDS_UV
 
 {{INPUTS}}
 
 {{VERTEX_MODIFIERS}}
 
-#ifdef PARTICLE_SCREEN_SPACE_SIZE
-    // Get perspective divide factor from clip space position. This is the "average" factor for the entire
-    // particle, taken at its position (mesh origin), and applied uniformly for all vertices.
-    let w_cs = transform_position_simulation_to_clip(particle.position).w;
-    // Scale size by w_cs to negate the perspective divide which will happen later after the vertex shader.
-    // The 2.0 factor is because clip space is in [-1:1] so we need to divide by the half screen size only.
-    let screen_size_pixels = view.viewport.zw;
-    let projection_scale = vec2<f32>(view.projection[0][0], view.projection[1][1]);
-    size = (size * w_cs * 2.0) / min(screen_size_pixels.x * projection_scale.x, screen_size_pixels.y * projection_scale.y);
-#endif
+#ifdef RIBBONS
+    let next_index = particle.next;
+    if (next_index >= arrayLength(&particle_buffer.particles)) {
+        out.position = vec4(0.0);
+        return out;
+    }
+
+    let next_particle = particle_buffer.particles[next_index];
+    var delta = next_particle.position - particle.position;
+
+    axis_x = normalize(delta);
+    axis_y = normalize(cross(axis_x, axis_z));
+    axis_z = cross(axis_x, axis_y);
+
+    position = mix(next_particle.position, particle.position, 0.5);
+    size = vec2(length(delta), size.y);
+#endif  // RIBBONS
 
     // Expand particle mesh vertex based on particle position ("origin"), and local
     // orientation and size of the particle mesh (currently: only quad).
     let vpos = vertex_position * vec3<f32>(size.x, size.y, 1.0);
-    let sim_position = particle.position
-        + axis_x * vpos.x
-        + axis_y * vpos.y;
+    let sim_position = position + axis_x * vpos.x + axis_y * vpos.y;
     out.position = transform_position_simulation_to_clip(sim_position);
 
     out.color = color;
@@ -165,15 +164,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 #ifdef USE_ALPHA_MASK
     var alpha_cutoff: f32 = {{ALPHA_CUTOFF}};
 #endif
+    var color = in.color;
+#ifdef NEEDS_UV
+    var uv = in.uv;
+#endif
 
 {{FRAGMENT_MODIFIERS}}
-
-    var color = in.color;
-
-#ifdef PARTICLE_TEXTURE
-    var texColor = textureSample(particle_texture, particle_sampler, in.uv);
-    {{PARTICLE_TEXTURE_SAMPLE_MAPPING}}
-#endif
 
 #ifdef USE_ALPHA_MASK
     if color.a >= alpha_cutoff {

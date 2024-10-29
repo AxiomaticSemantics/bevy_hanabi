@@ -5,8 +5,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added a new `serde` feature, and moved all `Serialization` and `Deserialization` derives under that feature.
+  This allows disabling support on wasm, where `typetag` is not available.
+  The feature is enabled by default, so the behavior doesn't change on non-wasm targets.
+- Added support for WebAssembly (`wasm`). This requires disabling the `serde` feature. (#41)
+- Added support for sampling textures in the Expression API via the `TextureSampleExpr` expression.
+  Currently only supports color textures (no depth texture) and only sampling via WGSL `textureSample()`. (#355)
+- Added a new `EffectMaterial` component holding the actual textures to bind to the various slots of a `Module`.
+- Added a new `Module::add_texture()` function to declare a new texture slot in a module.
+- Particle trails and ribbons can now be initialized with init modifiers.
+
 ### Changed
 
+- The `ParticleTextureModifier` doesn't directly hold the texture handle to use anymore.
+  Instead, it holds an expression handle to the texture slot defined in the `Module` of the effect.
+  This allows dynamically changing the texture sampled.
+- `RenderModifier::apply_render()` now returns a `Result<String, ExprError>`.
+- Several API changes occurred around the cloning of particles for trails and ribbons. See also the [migration guide (v0.12 -> v0.13)](./docs/migration-v0.12-to-v0.13.md).
+  - `EffectSpawner` is now wrapped into a new `EffectInitializers`. Each effect group has an `EffectInitializer`, which can either be an `EffectSpawner` (CPU spawning) or an `EffectCloner` (GPU particle cloning).
+  - `EffectAsset::new()` takes again a single capacity argument for the default first group. Other groups are incrementally added with `with_trails()` and `with_ribbons()`, specifying their respective capacity via those functions.
+  - The age (`Attribute::AGE`) and lifetime (`Attribute::LIFETIME`) of cloned particles can no longer be assigned manually; instead it's set via an argument to `EffectAsset::with_trails()` and `EffectAsset::with_ribbons()`, and cannot be modified anymore with expressions (and properties in particular).
+
+### Removed
+
+- The `CloneModifier` was removed. Cloning is now controlled by the `EffectCloner`.
+- The `RibbonModifier` was removed. Use `EffectAsset::with_ribbons()` to create ribbons.
+
+### Fixed
+
+- Fixed a bug where the generated render shader was declaring a binding as `storage<read>` (read-only)
+  but the `Spawner` struct contained an `atomic<i32>`, which requires write access.
+  The `Spawner` struct is now conditionally defining that field as `i32` instead.
+- Fixed a race condition in ribbons leading to visual artifacts (particles linked to other unrelated particles). (#376)
+
+## [0.12.2] 2024-08-05
+
+### Fixed
+
+- Fix regression building with `rustc 1.79`, which is the Bevy MSRV. (#360)
+
+## [0.12.1] 2024-07-28
+
+### Fixed
+
+- Fix new `rustc 1.80` linter error breaking the crate build. (#351)
+
+## [0.12.0] 2024-07-09
+
+### Added
+
+- Added `BuiltInOperator::IsAlive` exposing the current state of the `is_alive` particle flag,
+  which represents whether a particle is still alive or will be deallocated at the end of the update pass.
+
+### Changed
+
+- Compatible with Bevy 0.14.
+
+### Fixed
+
+- Prevented an error from being emitted when a GPU pipeline is still being created. (#341)
+- Fixed a panic when a particle effect as an invalid asset handle. (#343)
+
+## [0.11.0] 2024-05-29
+
+### Added
+
+- Added a new `ScreenSpaceSizeModifier` which negates the effect of perspective projection, and makes the particle's size a pixel size in screen space, instead of a Bevy world unit size. This replaces the hard-coded behavior previously available on the `SetSizeModifier`.
+- Added a new `ConformToSphereModifier` acting as an attractor applying a force toward a point (sphere center) to all particles in range, and making particles conform ("stick") to the sphere surface.
+- Added `vec2` and `vec3` functions that allow construction of vectors from dynamic parts.
+- Added missing `VectorValue::as_uvecX()` and `impl From<UVecX> for VectorValue` for all `X=2,3,4`.
+- Added a new `ShaderWriter` helper, common to the init and update modifier contexts, and which replaces the `InitContext` and `UpdateContext`.
+- Added a simple `impl Display for ModifierContext`.
+- Added `Modifier::apply()` which replaces the now deleted `InitModifier::apply_init()` and `UdpdateModifier::apply_update()`.
+- Added `RenderModifier::as_modifier()` to upcast a `RenderModifier` to a `Modifier`.
+- Added `RenderModifier::boxed_render_clone()` to clone a `RenderModifier` into a boxed self (instead of a `BoxedModifier`, as we can't upcast from `Box<dyn RenderModifier>` to `Box<dyn Modifier>`). Added `impl Clone for Box<dyn RenderModifier>` based on this.
+- Added `EffectAsset::add_modifier()` to add a pre-boxed `Modifier` (so, a `BoxedModifier`) to the init or update context, and added `EffectAsset::add_render_modifier()` to add a pre-boxed `RenderModifier` to the render context.
+- Added `sqrt` and `inverseSqrt` expressions to the Expression API.
+- Added `Hash` derive for `Property`.
+- Added `Module::add_property()`, `Module::get_property()`, and `Module::properties()`.
+- Added a new `PropertyHandle`, which is to `Property` what the existing `ExprHandle` is to `Expr`: a unique handle into a owning `Module`.
+- Added a new `RoundModifier` that allows round particles to be constructed without having to create a texture.
+- Added a new `trace` feature enabling some `span_info!()` profiling annotations.
+- Added the ability to make particle trails, via the `CloneModifier` and the addition of separate particle groups. See the `worms.rs` example for usage.
+- Added the ability to stitch trail particles together to form ribbons with the `RibbonModifier`.
+
+### Changed
+
+- `ExprHandle` is now `#[repr(transparent)]`, which guarantees that `Option<ExprHandle>` has the same size as `ExprHandle` itself (4 bytes).
+- `EffectProperties::set_if_changed()` now returns the `Mut` variable it takes as input, to allow subsequent calls.
+- `VectorValue::new_uvecX()` now take a `UVecX` instead of individual components, like for all other scalar types.
+- Merged the `InitModifier` and `UpdateModifier` traits into the `Modifier` subtrait; see other changelog entries for details. This helps manage modifiers in a unified way, and generally simplifies writing and maintain modifiers compatible with both the init and update contexts.
+- `EffectAsset::init()` and `EffectAsset::update()` now take a `Modifier`-bound type, and validate its `ModifierContext` is compatible (and panics if not).
+- `EffectAsset::render()` now panics if the modifier is not compatible with the `ModifierContext::Render`. Note that this indicates a malformed render modifier, because all objects implementing `RenderModifier` must include `ModifierContext::Render` in their `Modifier::context()`.
+- Improved the serialization format to reduce verbosity, by making the following types `#[serde(transparent)]`: `ExprHandle`, `LiteralExpr`, `PropertyExpr`.
+- Moved properties from `EffectAsset` to `Module`.
+- `Module::prop()` and `PropertyExpr::new()` now take a `PropertyHandle` instead of a property name (string).
+- The following modifiers' `via_property()` function now takes a `PropertyHandle` instead of a property name: `AccelModifier`, `RadialAccelModifier`, `TangentAccelModifier`.
+- `Expr` is now `Copy`, making it even more lightweight.
+- `ExprWriter::prop()` now panics if the property doesn't exist. This ensures the created `WriterExpr` is well-formed, which was impossible to validate at expression write time previously.
+- Effects rendered with `AlphaMode::Mask` now write to the depth buffer. Other effects continue to not write to it. This fixes particle flickering for alpha masked effects only.
+- Bind groups for effect rendering are now created in a separate system in the `EffectSystems::PrepareBindGroups` set, itself part of Bevy's `RenderSet::PrepareBindGroups`. They're also cached, which increases the performance of rendering many effects.
+- Merged the init and update pass bind groups for the particle buffer and associated resources in `EffectBfufer`. The new unified resources use the `_sim` (simulation) suffix.
+- `CompiledParticleEffect` now holds a strong handle to the same `EffectAsset` as the `ParticleEffect` it's compiled from. This ensures the asset is not unloaded while in use during the frame. To allow an `EffectAsset` to unload, clear the handle of the `ParticleEffect`, then allow the `CompiledParticleEffect` to observe the change and clear its own handle too.
+- The `EffectProperties` component is now mandatory, and has been added to the `ParticleEffectBundle`. (#309)
+
+### Removed
+
+- Removed the `screen_space_size` field from the `SetSizeModifier`. Use the new `ScreenSpaceSizeModifier` to use a screen-space size.
+- Removed the built-in `ForceFieldSource` and associated `ForceFieldModifier`. Use the new `ConformToSphereModifer` instead. The behavior might change a bit as the conforming code is not strictly identical; use the `force_field.rs` example with the `examples_world_inspector` feature to tweak the parameters in real time and observe how they work and change the effect.
+- Removed `InitContext` and `UpdateContext`; they're replaced with `ShaderWriter`.
+- Removed `InitModifer` and `UpdateModifer`. Modifiers for the init and update contexts now only need to implement the base `Modifier` trait.
+- Removed downcast methods from `Modifier` (`as_init()`, `as_init_mut()`, `as_update()`, `as_update_mut()`).
+- Removed the various helper macros `impl_mod_xxx!()` to implement modifier traits; simply implement the trait by hand instead.
+- Removed `EffectAsset::with_property()` and `EffectAsset::add_property()`; use `Module::add_property()` instead.
+- `PropertyExpr` doesn't implement anymore `ToWgslString` nor `From<String>`. To create a `PropertyExpr`, you need a valid `PropertyHandle`, which would have been created via `Module::add_property()` with a default value enforcing a type. This ensures property expressions are well-formed on creation, and cannot reference non-existent properties.
+- Removed `ParticleEffect::spawner`, which was used as a per-instance override of `EffectAsset::spawner`. Manual spawn an `EffectSpawner` component with overridden values to achieve the same feature.
+
+### Fixed
+
+- Fixed a panic in rendering randomly occurring when no effect is present.
+- Fixed invalid WGSL being generated for large `u32` values.
+- Fixed particle flickering, only for particles rendered through the `AlphaMask3d` render pass (`EffectAsset::alpha_mode == AlphaMode::Mask`). (#183)
+- Fixed invalid layout of all `mat3xR<f32>` returned by `MatrixValue::as_bytes()`, which was missing padding. (#310)
+- Fixed a regression where declaring properties but not adding an `EffectProperties` component would prevent properties from being uploaded to GPU. The `EffectProperties` component is now mandatory, even if the effect doesn't use any property. However there's still no GPU resource allocated if no property is used. (#309)
+- Fixed the missing PRNG seeding per particle effect instance in the update pass. (#333)
+
+## [0.10.0] 2024-02-24
+
+### Changed
+
+- Compatible with Bevy 0.13
 - Moved most shared WGSL code into an import module `vfx_common.wgsl`. This requires using `naga_oil` for import resolution, which in turns means `naga` and `naga_oil` are now dependencies of `bevy_hanabi` itself.
 
 ### Fixed

@@ -1,49 +1,17 @@
-use bevy::{
-    core_pipeline::tonemapping::Tonemapping,
-    log::LogPlugin,
-    prelude::*,
-    render::{
-        mesh::shape::Cube, render_resource::WgpuFeatures, settings::WgpuSettings,
-        view::RenderLayers, RenderPlugin,
-    },
-};
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use std::f32::consts::PI;
 
+use bevy::{core_pipeline::tonemapping::Tonemapping, prelude::*, render::view::RenderLayers};
 use bevy_hanabi::prelude::*;
 
+mod utils;
+use utils::*;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut wgpu_settings = WgpuSettings::default();
-    wgpu_settings
-        .features
-        .set(WgpuFeatures::VERTEX_WRITABLE_STORAGE, true);
-
-    App::default()
-        .insert_resource(ClearColor(Color::BLACK))
-        .add_plugins(
-            DefaultPlugins
-                .set(LogPlugin {
-                    level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,gradient=trace".to_string(),
-                })
-                .set(RenderPlugin {
-                    render_creation: wgpu_settings.into(),
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "🎆 Hanabi — gradient".to_string(),
-                        ..default()
-                    }),
-                    ..default()
-                }),
-        )
-        .add_plugins(HanabiPlugin)
-        .add_plugins(WorldInspectorPlugin::default())
+    let app_exit = utils::make_test_app("gradient")
         .add_systems(Startup, setup)
-        .add_systems(Update, (bevy::window::close_on_esc, update))
+        .add_systems(Update, update)
         .run();
-
-    Ok(())
+    app_exit.into_result()
 }
 
 fn setup(
@@ -96,15 +64,22 @@ fn setup(
         speed: writer.lit(2.).expr(),
     };
 
+    // Use texture slot #0 in ParticleTextureModifier
+    let texture_slot = writer.lit(0u32).expr();
+
+    // Define that texture slot (giving it a name for convenience)
+    let mut module = writer.finish();
+    module.add_texture("color");
+
     let effect = effects.add(
-        EffectAsset::new(32768, Spawner::rate(1000.0.into()), writer.finish())
+        EffectAsset::new(32768, Spawner::rate(1000.0.into()), module)
             .with_name("gradient")
             .init(init_pos)
             .init(init_vel)
             .init(init_age)
             .init(init_lifetime)
             .render(ParticleTextureModifier {
-                texture: texture_handle.clone(),
+                texture_slot,
                 sample_mapping: ImageSampleMapping::ModulateOpacityFromR,
             })
             .render(ColorOverLifetimeModifier { gradient }),
@@ -117,11 +92,17 @@ fn setup(
             // We need to spawn the effect with the same render layer as the camera, otherwise it
             // won't be rendered.
             RenderLayers::layer(3),
+            // We need to bind a texture to the slot #0 we created above
+            EffectMaterial {
+                images: vec![texture_handle.clone()],
+            },
         ))
         .with_children(|p| {
             p.spawn(PbrBundle {
-                mesh: meshes.add(Mesh::from(Cube { size: 1.0 })),
-                material: materials.add(Color::RED.into()),
+                mesh: meshes.add(Cuboid {
+                    half_size: Vec3::splat(0.5),
+                }),
+                material: materials.add(utils::COLOR_RED),
                 ..Default::default()
             });
         });

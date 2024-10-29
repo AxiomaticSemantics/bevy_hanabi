@@ -5,25 +5,16 @@ struct SimParams {
     delta_time: f32,
     /// Time in seconds since the start of simulation.
     time: f32,
-//#ifdef SIM_PARAMS_INDIRECT_DATA
-    /// Number of effects batched together.
-    num_effects: u32,
-    /// Stride in bytes of the RenderIndirect struct. Used to calculate
-    /// the position of each effect's data into the buffer of a batch.
-    render_stride: u32,
-    /// Stride in bytes of the DispatchIndirect struct. Used to calculate
-    /// the position of each effect's data into the buffer of a batch.
-    dispatch_stride: u32,
-//#endif
-}
-
-struct ForceFieldSource {
-    position: vec3<f32>,
-    max_radius: f32,
-    min_radius: f32,
-    mass: f32,
-    force_exponent: f32,
-    conform_to_sphere: f32,
+    /// Virtual delta time in seconds since last simulation tick.
+    virtual_delta_time: f32,
+    /// Virtual time in seconds since the start of simulation.
+    virtual_time: f32,
+    /// Real delta time in seconds since last simulation tick.
+    real_delta_time: f32,
+    /// Real time in seconds since the start of simulation.
+    real_time: f32,
+    /// Number of groups batched together.
+    num_groups: u32,
 }
 
 struct Spawner {
@@ -31,12 +22,37 @@ struct Spawner {
     inverse_transform: mat3x4<f32>, // transposed (row-major)
     spawn: i32,
     seed: u32,
+    // Can't use storage<read> with atomics
+#ifdef SPAWNER_READONLY
+    count: i32,
+#else
     count: atomic<i32>,
+#endif
     effect_index: u32,
-    force_field: array<ForceFieldSource, 16>,
+    // The lifetime to initialize particles with. This is only used for cloners
+    // (i.e. trails or ribbons).
+    lifetime: f32,
 #ifdef SPAWNER_PADDING
     {{SPAWNER_PADDING}}
 #endif
+}
+
+// Per-group data for a single particle effect group inside an effect.
+struct ParticleGroup {
+    // Index of the group, generally zero unless there are trails.
+    group_index: u32,
+    effect_index: u32,
+    // The index relative to the effect: e.g. 0 if this is the first group in
+    // the effect.
+    index_in_effect: u32,
+    // Index of the first element for this group in the indirect index buffer.
+    indirect_index: u32,
+    // The capacity of this group.
+    capacity: u32,
+    // The index of the first particle in this effect in the particle and
+    // indirect buffers.
+    effect_particle_offset: u32,
+    {{PARTICLE_GROUP_PADDING}}
 }
 
 struct IndirectBuffer {
@@ -63,60 +79,56 @@ struct DispatchIndirect {
     /// as an indirect draw source so cannot also be bound as regular storage
     /// buffer for reading.
     pong: u32,
+    {{DISPATCH_INDIRECT_PADDING}}
 }
 
 // Render indirect array offsets. Used when accessing an array of RenderIndirect
 // as a raw array<u32>, so that we can avoid WGSL struct padding and keep data
 // more compact in the render indirect buffer. Each offset corresponds to a field
 // in the RenderIndirect struct.
-const RI_OFFSET_VERTEX_COUNT: u32 = 0u;
-const RI_OFFSET_INSTANCE_COUNT: u32 = 1u;
-const RI_OFFSET_BASE_INDEX: u32 = 2u;
-const RI_OFFSET_VERTEX_OFFSET: u32 = 3u;
-const RI_OFFSET_BASE_INSTANCE: u32 = 4u;
-const RI_OFFSET_ALIVE_COUNT: u32 = 5u;
-const RI_OFFSET_DEAD_COUNT: u32 = 6u;
-const RI_OFFSET_MAX_SPAWN: u32 = 7u;
-const RI_OFFSET_PING: u32 = 8u;
-const RI_OFFSET_MAX_UPDATE: u32 = 9u;
+const REM_OFFSET_PING: u32 = 0u;
+
+const RGI_OFFSET_VERTEX_COUNT: u32 = 0u;
+const RGI_OFFSET_INSTANCE_COUNT: u32 = 1u;
+const RGI_OFFSET_VERTEX_OFFSET: u32 = 2u;
+const RGI_OFFSET_BASE_INSTANCE: u32 = 3u;
+const RGI_OFFSET_ALIVE_COUNT: u32 = 4u;
+const RGI_OFFSET_MAX_UPDATE: u32 = 5u;
+const RGI_OFFSET_DEAD_COUNT: u32 = 6u;
+const RGI_OFFSET_MAX_SPAWN: u32 = 7u;
+
+struct RenderEffectMetadata {
+    /// Index of the ping buffer for particle indices. Init and update compute passes
+    /// always write into the ping buffer and read from the pong buffer. The buffers
+    /// are swapped during the indirect dispatch.
+    ping: u32,
+    {{RENDER_EFFECT_INDIRECT_PADDING}}
+}
 
 /// Render indirect parameters for GPU driven rendering.
-struct RenderIndirect {
+struct RenderGroupIndirect {
     /// Number of vertices in the particle mesh. Currently always 4 (quad mesh).
     vertex_count: u32,
     /// Number of mesh instances, equal to the number of particles.
     instance_count: atomic<u32>,
-    /// Base index (always zero).
-    base_index: u32,
     /// Vertex offset (always zero).
     vertex_offset: i32,
-    /// Base instance (always zero).
+    /// Base instance.
     base_instance: u32,
     /// Number of particles alive after the init pass, used to calculate the number
     /// of compute threads to spawn for the update pass and to cap those threads
     /// via `max_update`.
     alive_count: atomic<u32>,
-    /// Number of dead particles, decremented during the init pass as new particles
-    /// are spawned, and incremented during the update pass as existing particles die.
-    dead_count: atomic<u32>,
-    /// Maxmimum number of init threads to run on next frame. This is cached from
-    /// `dead_count` during the indirect dispatch of the previous frame, so that the
-    /// init compute pass can cap its thread count while also decrementing the actual
-    /// `dead_count` as particles are spawned.
-#ifdef RI_MAX_SPAWN_ATOMIC
-    max_spawn: atomic<u32>,
-#else
-    max_spawn: u32,
-#endif
-    /// Index of the ping buffer for particle indices. Init and update compute passes
-    /// always write into the ping buffer and read from the pong buffer. The buffers
-    /// are swapped during the indirect dispatch.
-    ping: u32,
     /// Maximum number of update threads to run. This is cached from `alive_count`
     /// during the indirect dispatch, so that the update compute pass can cap its
     /// thread count while also modifying the actual `alive_count` if some particle
     /// dies during the update pass.
     max_update: u32,
+    /// Number of dead particles, decremented during the init pass as new particles
+    /// are spawned, and incremented during the update pass as existing particles die.
+    dead_count: atomic<u32>,
+    max_spawn: atomic<u32>,
+    {{RENDER_GROUP_INDIRECT_PADDING}}
 }
 
 var<private> seed : u32 = 0u;
@@ -180,8 +192,49 @@ fn frand4() -> vec4<f32> {
     return vec4<f32>(x, y, z, w);
 }
 
-fn rand_uniform(a: f32, b: f32) -> f32 {
+fn rand_uniform_f(a: f32, b: f32) -> f32 {
     return a + frand() * (b - a);
+}
+
+fn rand_uniform_vec2(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+    return a + frand2() * (b - a);
+}
+
+fn rand_uniform_vec3(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    return a + frand3() * (b - a);
+}
+
+fn rand_uniform_vec4(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    return a + frand4() * (b - a);
+}
+
+// Normal distribution computed using Box-Muller transform
+fn rand_normal_f(mean: f32, std_dev: f32) -> f32 {
+    var u = frand();
+    var v = frand();
+    var r = sqrt(-2.0 * log(u));
+    return mean + std_dev * r * cos(tau * v);
+}
+
+fn rand_normal_vec2(mean: vec2f, std_dev: vec2f) -> vec2f {
+    var u = frand();
+    var v = frand2();
+    var r = sqrt(-2.0 * log(u));
+    return mean + std_dev * r * cos(tau * v);
+}
+
+fn rand_normal_vec3(mean: vec3f, std_dev: vec3f) -> vec3f {
+    var u = frand();
+    var v = frand3();
+    var r = sqrt(-2.0 * log(u));
+    return mean + std_dev * r * cos(tau * v);
+}
+
+fn rand_normal_vec4(mean: vec4f, std_dev: vec4f) -> vec4f {
+    var u = frand();
+    var v = frand4();
+    var r = sqrt(-2.0 * log(u));
+    return mean + std_dev * r * cos(tau * v);
 }
 
 fn proj(u: vec3<f32>, v: vec3<f32>) -> vec3<f32> {

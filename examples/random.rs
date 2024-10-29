@@ -1,50 +1,17 @@
 //! Example of using random spawner params.
 //! Spawns a random number of particles at random times.
 
-use bevy::{
-    core_pipeline::tonemapping::Tonemapping,
-    log::LogPlugin,
-    prelude::*,
-    render::{
-        mesh::shape::Cube, render_resource::WgpuFeatures, settings::WgpuSettings, RenderPlugin,
-    },
-};
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
-
+use bevy::{core_pipeline::tonemapping::Tonemapping, prelude::*};
 use bevy_hanabi::prelude::*;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut wgpu_settings = WgpuSettings::default();
-    wgpu_settings
-        .features
-        .set(WgpuFeatures::VERTEX_WRITABLE_STORAGE, true);
+mod utils;
+use utils::*;
 
-    App::default()
-        .insert_resource(ClearColor(Color::DARK_GRAY))
-        .add_plugins(
-            DefaultPlugins
-                .set(LogPlugin {
-                    level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,random=trace".to_string(),
-                })
-                .set(RenderPlugin {
-                    render_creation: wgpu_settings.into(),
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "🎆 Hanabi — random".to_string(),
-                        ..default()
-                    }),
-                    ..default()
-                }),
-        )
-        .add_systems(Update, bevy::window::close_on_esc)
-        .add_plugins(HanabiPlugin)
-        .add_plugins(WorldInspectorPlugin::default())
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let app_exit = utils::make_test_app("random")
         .add_systems(Startup, setup)
         .run();
-
-    Ok(())
+    app_exit.into_result()
 }
 
 fn setup(
@@ -71,8 +38,10 @@ fn setup(
         ..Default::default()
     });
 
-    let cube = meshes.add(Mesh::from(Cube { size: 1.0 }));
-    let mat = materials.add(Color::PURPLE.into());
+    let cube = meshes.add(Cuboid {
+        half_size: Vec3::splat(0.5),
+    });
+    let mat = materials.add(utils::COLOR_PURPLE);
 
     let mut gradient = Gradient::new();
     gradient.add_key(0.0, Vec4::new(0.0, 0.0, 1.0, 1.0));

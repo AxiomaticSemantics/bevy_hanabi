@@ -3,52 +3,22 @@
 //! A sphere spawns dust in a circle. Each dust particle is animated with a
 //! [`FlipbookModifier`], from a procedurally generated sprite sheet.
 
-use bevy::{
-    core_pipeline::tonemapping::Tonemapping,
-    log::LogPlugin,
-    prelude::*,
-    render::{render_resource::WgpuFeatures, settings::WgpuSettings, RenderPlugin},
-};
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use std::f32::consts::FRAC_PI_2;
 
+use bevy::{core_pipeline::tonemapping::Tonemapping, prelude::*};
 use bevy_hanabi::prelude::*;
 
 mod texutils;
+mod utils;
 
 use texutils::make_anim_img;
+use utils::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut wgpu_settings = WgpuSettings::default();
-    wgpu_settings
-        .features
-        .set(WgpuFeatures::VERTEX_WRITABLE_STORAGE, true);
-
-    App::default()
-        .insert_resource(ClearColor(Color::DARK_GRAY))
-        .add_plugins(
-            DefaultPlugins
-                .set(LogPlugin {
-                    level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,circle=trace".to_string(),
-                })
-                .set(RenderPlugin {
-                    render_creation: wgpu_settings.into(),
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "🎆 Hanabi — circle".to_string(),
-                        ..default()
-                    }),
-                    ..default()
-                }),
-        )
-        .add_systems(Update, bevy::window::close_on_esc)
-        .add_plugins(HanabiPlugin)
-        .add_plugins(WorldInspectorPlugin::default())
+    let app_exit = utils::make_test_app("circle")
         .add_systems(Startup, setup)
         .run();
-
-    Ok(())
+    app_exit.into_result()
 }
 
 fn setup(
@@ -136,38 +106,39 @@ fn setup(
         .expr();
     let update_sprite_index = SetAttributeModifier::new(Attribute::SPRITE_INDEX, sprite_index);
 
+    let texture_slot = writer.lit(0u32).expr();
+
+    let mut module = writer.finish();
+    module.add_texture("color");
+
     let effect = effects.add(
-        EffectAsset::new(
-            32768,
-            Spawner::burst(32.0.into(), 8.0.into()),
-            writer.finish(),
-        )
-        .with_name("circle")
-        .init(init_pos)
-        .init(init_vel)
-        .init(init_age)
-        .init(init_lifetime)
-        .update(update_sprite_index)
-        .render(ParticleTextureModifier {
-            texture: texture_handle.clone(),
-            sample_mapping: ImageSampleMapping::ModulateOpacityFromR,
-        })
-        .render(FlipbookModifier { sprite_grid_size })
-        .render(ColorOverLifetimeModifier { gradient })
-        .render(SizeOverLifetimeModifier {
-            gradient: Gradient::constant([0.5; 2].into()),
-            screen_space_size: false,
-        }),
+        EffectAsset::new(32768, Spawner::burst(32.0.into(), 8.0.into()), module)
+            .with_name("circle")
+            .init(init_pos)
+            .init(init_vel)
+            .init(init_age)
+            .init(init_lifetime)
+            .update(update_sprite_index)
+            .render(ParticleTextureModifier {
+                texture_slot: texture_slot,
+                sample_mapping: ImageSampleMapping::ModulateOpacityFromR,
+            })
+            .render(FlipbookModifier { sprite_grid_size })
+            .render(ColorOverLifetimeModifier { gradient })
+            .render(SizeOverLifetimeModifier {
+                gradient: Gradient::constant([0.5; 2].into()),
+                screen_space_size: false,
+            }),
     );
 
     // The ground
     commands
         .spawn(PbrBundle {
-            mesh: meshes.add(Mesh::from(shape::Plane {
-                size: 4.0,
-                ..default()
-            })),
-            material: materials.add(Color::BLUE.into()),
+            mesh: meshes.add(Rectangle {
+                half_size: Vec2::splat(2.0),
+            }),
+            material: materials.add(utils::COLOR_BLUE),
+            transform: Transform::from_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
             ..Default::default()
         })
         .insert(Name::new("ground"));
@@ -175,18 +146,18 @@ fn setup(
     // The sphere
     commands
         .spawn(PbrBundle {
-            mesh: meshes.add(Mesh::from(shape::UVSphere {
-                radius: 1.0,
-                sectors: 32,
-                stacks: 16,
-            })),
-            material: materials.add(Color::CYAN.into()),
+            mesh: meshes.add(Sphere { radius: 1.0 }),
+            material: materials.add(utils::COLOR_CYAN),
             transform: Transform::from_translation(Vec3::Y),
             ..Default::default()
         })
         .insert(Name::new("sphere"));
 
-    commands
-        .spawn(ParticleEffectBundle::new(effect))
-        .insert(Name::new("effect"));
+    commands.spawn((
+        ParticleEffectBundle::new(effect),
+        EffectMaterial {
+            images: vec![texture_handle],
+        },
+        Name::new("effect"),
+    ));
 }

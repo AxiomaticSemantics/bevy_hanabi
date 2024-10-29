@@ -1,5 +1,6 @@
+use std::num::NonZeroU64;
+
 use bevy::{
-    core::{cast_slice, Pod},
     log::trace,
     render::{
         render_resource::{
@@ -8,8 +9,8 @@ use bevy::{
         renderer::{RenderDevice, RenderQueue},
     },
 };
+use bytemuck::{cast_slice, Pod};
 use copyless::VecHelper;
-use std::num::NonZeroU64;
 
 use crate::next_multiple_of;
 
@@ -148,7 +149,13 @@ impl<T: Pod + ShaderType + ShaderSize> AlignedBufferVec<T> {
         index
     }
 
-    pub fn reserve(&mut self, capacity: usize, device: &RenderDevice) {
+    /// Reserve some capacity into the buffer.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the buffer was (re)allocated, or `false` if an existing buffer
+    /// was reused which already had enough capacity.
+    pub fn reserve(&mut self, capacity: usize, device: &RenderDevice) -> bool {
         if capacity > self.capacity {
             let size = self.aligned_size * capacity;
             trace!(
@@ -165,12 +172,20 @@ impl<T: Pod + ShaderType + ShaderSize> AlignedBufferVec<T> {
                 mapped_at_creation: false,
             }));
             // FIXME - this discards the old content if any!!!
+            true
+        } else {
+            false
         }
     }
 
-    pub fn write_buffer(&mut self, device: &RenderDevice, queue: &RenderQueue) {
+    /// Schedule the buffer write to GPU.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the buffer was (re)allocated, `false` otherwise.
+    pub fn write_buffer(&mut self, device: &RenderDevice, queue: &RenderQueue) -> bool {
         if self.values.is_empty() {
-            return;
+            return false;
         }
         trace!(
             "write_buffer: values.len={} item_size={} aligned_size={}",
@@ -178,7 +193,7 @@ impl<T: Pod + ShaderType + ShaderSize> AlignedBufferVec<T> {
             self.item_size,
             self.aligned_size
         );
-        self.reserve(self.values.len(), device);
+        let buffer_changed = self.reserve(self.values.len(), device);
         if let Some(buffer) = &self.buffer {
             let aligned_size = self.aligned_size * self.values.len();
             trace!("aligned_buffer: size={}", aligned_size);
@@ -194,6 +209,7 @@ impl<T: Pod + ShaderType + ShaderSize> AlignedBufferVec<T> {
             let bytes: &[u8] = cast_slice(&aligned_buffer);
             queue.write_buffer(buffer, 0, bytes);
         }
+        buffer_changed
     }
 
     pub fn clear(&mut self) {
@@ -333,9 +349,10 @@ mod tests {
 
 #[cfg(all(test, feature = "gpu_tests"))]
 mod gpu_tests {
+    use tests::*;
+
     use super::*;
     use crate::test_utils::MockRenderer;
-    use tests::*;
 
     #[test]
     fn abv_write() {
@@ -378,11 +395,11 @@ mod gpu_tests {
         abv.write_buffer(&device, &queue);
         // need a submit() for write_buffer() to be processed
         queue.submit([command_buffer]);
-        device.poll(wgpu::Maintain::Wait);
         let (tx, rx) = futures::channel::oneshot::channel();
         queue.on_submitted_work_done(move || {
             tx.send(()).unwrap();
         });
+        device.poll(wgpu::Maintain::Wait);
         let _ = futures::executor::block_on(rx);
         println!("Buffer written");
 

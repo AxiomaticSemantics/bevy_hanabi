@@ -1,10 +1,8 @@
-#![cfg(test)]
-
-#[cfg(feature = "gpu_tests")]
-use bevy::render::renderer::{RenderDevice, RenderQueue};
+use std::ops::Sub;
 
 use bevy::prelude::{Quat, Vec2, Vec3, Vec4};
-use std::ops::Sub;
+#[cfg(feature = "gpu_tests")]
+use bevy::render::renderer::{RenderDevice, RenderQueue, WgpuWrapper};
 
 /// Utility trait to compare floating-point values with a tolerance.
 pub(crate) trait AbsDiffEq {
@@ -92,7 +90,7 @@ impl AbsDiffEq for Quat {
 ///
 /// ```
 /// let x = 3.500009;
-/// assert_approx_eq!(x, 3.5);       // default tolerance 1e-5
+/// assert_approx_eq!(x, 3.5); // default tolerance 1e-5
 ///
 /// let x = 3.509;
 /// assert_approx_eq!(x, 3.5, 0.01); // explicit tolerance
@@ -148,12 +146,19 @@ pub(crate) struct MockRenderer {
 impl MockRenderer {
     /// Create a new mock renderer with a default backend and adapter.
     pub fn new() -> Self {
+        #[cfg(debug_assertions)]
+        let flags = wgpu::InstanceFlags::DEBUG | wgpu::InstanceFlags::VALIDATION;
+        #[cfg(not(debug_assertions))]
+        let flags = 0;
+
         // Create the WGPU adapter. Use PRIMARY backends (Vulkan, Metal, DX12,
         // Browser+WebGPU) to ensure we get a backend that supports compute and other
         // modern features we might need.
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
+            flags,
             dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+            gles_minor_version: wgpu::Gles3MinorVersion::default(),
         });
         let adapter =
             futures::executor::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -169,10 +174,10 @@ impl MockRenderer {
                 label: None,
                 // Request MAPPABLE_PRIMARY_BUFFERS to allow MAP_WRITE|COPY_DST.
                 // FIXME - Should use a separate buffer from primary to support more platforms.
-                features: wgpu::Features::MAPPABLE_PRIMARY_BUFFERS,
+                required_features: wgpu::Features::MAPPABLE_PRIMARY_BUFFERS,
                 // Request downlevel_defaults() for maximum compatibility in testing. The actual
                 // Hanabi library uses the default requested mode of the app.
-                limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
             },
             None,
         ))
@@ -180,7 +185,7 @@ impl MockRenderer {
 
         // Turn into Bevy objects
         let device = RenderDevice::from(device);
-        let queue = RenderQueue(std::sync::Arc::new(queue));
+        let queue = RenderQueue(std::sync::Arc::new(WgpuWrapper::new(queue)));
 
         Self {
             instance,

@@ -87,7 +87,8 @@
 //! let mut w = ExprWriter::new();
 //!
 //! // Build a complex expression: max(3.42, properties.my_prop)
-//! let expr = w.lit(3.42).max(w.prop("my_prop"));
+//! let prop = w.add_property("my_property", 3.0.into());
+//! let expr = w.lit(3.42).max(w.prop(prop));
 //!
 //! // Finalize the expression and write it into the Module. The returned handle can
 //! // be assign to a modifier input.
@@ -103,16 +104,18 @@
 
 use std::{cell::RefCell, num::NonZeroU32, rc::Rc};
 
-use bevy::{reflect::Reflect, utils::thiserror::Error};
+use bevy::{prelude::default, reflect::Reflect};
 use serde::{Deserialize, Serialize};
-
-use crate::{
-    Attribute, ModifierContext, ParticleLayout, PropertyLayout, ScalarType, ToWgslString, ValueType,
-};
+use thiserror::Error;
 
 use super::Value;
+use crate::{
+    Attribute, ModifierContext, ParticleLayout, Property, PropertyLayout, ScalarType,
+    TextureLayout, TextureSlot, ToWgslString, ValueType, VectorType,
+};
 
-type Index = NonZeroU32;
+/// A one-based ID into a collection of a [`Module`].
+type Id = NonZeroU32;
 
 /// Handle of an expression inside a given [`Module`].
 ///
@@ -124,19 +127,111 @@ type Index = NonZeroU32;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Reflect, Serialize, Deserialize,
 )]
+#[repr(transparent)]
+#[serde(transparent)]
 pub struct ExprHandle {
-    index: Index,
+    id: Id,
 }
 
 impl ExprHandle {
-    /// Create a new handle from a 1-based [`Index`].
-    fn new(index: Index) -> Self {
-        Self { index }
+    /// Create a new handle from a 1-based [`Id`].
+    #[allow(dead_code)]
+    fn new(id: Id) -> Self {
+        Self { id }
+    }
+
+    /// Create a new handle from a 1-based [`Id`] as a `usize`, for cases where
+    /// the index is known to be non-zero already.
+    #[allow(unsafe_code)]
+    unsafe fn new_unchecked(id: usize) -> Self {
+        debug_assert!(id != 0);
+        Self {
+            id: NonZeroU32::new_unchecked(id as u32),
+        }
     }
 
     /// Get the zero-based index into the array of the module.
     fn index(&self) -> usize {
-        (self.index.get() - 1) as usize
+        (self.id.get() - 1) as usize
+    }
+}
+
+/// Handle of a property inside a given [`Module`].
+///
+/// A handle uniquely references a [`Property`] stored inside a [`Module`]. It's
+/// a lightweight representation, similar to a simple array index. For this
+/// reason, it's easily copyable. However it's also lacking any kind of error
+/// checking, and mixing handles to different modules produces undefined
+/// behaviors (like an index does when indexing the wrong array).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Reflect, Serialize, Deserialize,
+)]
+#[repr(transparent)]
+#[serde(transparent)]
+pub struct PropertyHandle {
+    id: Id,
+}
+
+impl PropertyHandle {
+    /// Create a new handle from a 1-based [`Id`].
+    #[allow(dead_code)]
+    fn new(id: Id) -> Self {
+        Self { id }
+    }
+
+    /// Create a new handle from a 1-based [`Id`] as a `usize`, for cases where
+    /// the index is known to be non-zero already.
+    #[allow(unsafe_code)]
+    unsafe fn new_unchecked(id: usize) -> Self {
+        debug_assert!(id != 0);
+        Self {
+            id: NonZeroU32::new_unchecked(id as u32),
+        }
+    }
+
+    /// Get the zero-based index into the array of the module.
+    fn index(&self) -> usize {
+        (self.id.get() - 1) as usize
+    }
+}
+
+/// Handle of a texture inside a given [`Module`].
+///
+/// A handle uniquely references a [`TextureSlot`] stored inside a [`Module`].
+/// It's a lightweight representation, similar to a simple array index. For this
+/// reason, it's easily copyable. However it's also lacking any kind of error
+/// checking, and mixing handles to different modules produces undefined
+/// behaviors (like an index does when indexing the wrong array).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Reflect, Serialize, Deserialize,
+)]
+#[repr(transparent)]
+#[serde(transparent)]
+pub struct TextureHandle {
+    id: Id,
+}
+
+impl TextureHandle {
+    /// Create a new handle from a 1-based [`Id`].
+    #[allow(dead_code)]
+    fn new(id: Id) -> Self {
+        Self { id }
+    }
+
+    /// Create a new handle from a 1-based [`Id`] as a `usize`, for cases where
+    /// the index is known to be non-zero already.
+    #[allow(unsafe_code)]
+    unsafe fn new_unchecked(id: usize) -> Self {
+        debug_assert!(id != 0);
+        Self {
+            id: NonZeroU32::new_unchecked(id as u32),
+        }
+    }
+
+    /// Get the zero-based index into the array of the module.
+    #[allow(dead_code)]
+    fn index(&self) -> usize {
+        (self.id.get() - 1) as usize
     }
 }
 
@@ -161,7 +256,12 @@ impl ExprHandle {
 /// [`attr()`]: Module::attr
 #[derive(Debug, Default, Clone, PartialEq, Hash, Reflect, Serialize, Deserialize)]
 pub struct Module {
+    /// Expressions defined in the module.
     expressions: Vec<Expr>,
+    /// Properties used as part of a [`PropertyExpr`].
+    properties: Vec<Property>,
+    /// Texture layout.
+    texture_layout: TextureLayout,
 }
 
 macro_rules! impl_module_unary {
@@ -197,15 +297,91 @@ macro_rules! impl_module_ternary {
 impl Module {
     /// Create a new module from an existing collection of expressions.
     pub fn from_raw(expr: Vec<Expr>) -> Self {
-        Self { expressions: expr }
+        Self {
+            expressions: expr,
+            properties: vec![],
+            texture_layout: default(),
+        }
+    }
+
+    /// Add a new property to the module.
+    ///
+    /// See [`Property`] for more details on what effect properties are.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a property with the same name already exists.
+    pub fn add_property(
+        &mut self,
+        name: impl Into<String>,
+        default_value: Value,
+    ) -> PropertyHandle {
+        let name = name.into();
+        assert!(!self.properties.iter().any(|p| p.name() == name));
+        self.properties.push(Property::new(name, default_value));
+        // SAFETY - We just pushed a new property into the array, so its length is
+        // non-zero.
+        #[allow(unsafe_code)]
+        unsafe {
+            PropertyHandle::new_unchecked(self.properties.len())
+        }
+    }
+
+    /// Get an existing property by handle.
+    ///
+    /// Existing properties are properties previously created with
+    /// [`add_property()`].
+    ///
+    /// [`add_property()`]: crate::Module::add_property
+    pub fn get_property(&self, property: PropertyHandle) -> Option<&Property> {
+        self.properties.get(property.index())
+    }
+
+    /// Get an existing property by name.
+    ///
+    /// Existing properties are properties previously created with
+    /// [`add_property()`].
+    ///
+    /// [`add_property()`]: crate::Module::add_property
+    pub fn get_property_by_name(&self, name: &str) -> Option<PropertyHandle> {
+        self.properties
+            .iter()
+            .enumerate()
+            .find(|(_, prop)| prop.name() == name)
+            .map(|(index, _)| PropertyHandle::new(NonZeroU32::new(index as u32 + 1).unwrap()))
+    }
+
+    /// Get the list of existing properties.
+    pub fn properties(&self) -> &[Property] {
+        &self.properties
+    }
+
+    /// Add a new texture to the module.
+    ///
+    /// See [`TextureSlot`] for more details on what effect textures are.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a texture with the same name already exists.
+    pub fn add_texture(&mut self, name: impl Into<String>) -> TextureHandle {
+        let name = name.into();
+        assert!(!self.texture_layout.layout.iter().any(|t| t.name == name));
+        self.texture_layout.layout.push(TextureSlot { name });
+        // SAFETY - We just pushed a new property into the array, so its length is
+        // non-zero.
+        #[allow(unsafe_code)]
+        unsafe {
+            TextureHandle::new_unchecked(self.texture_layout.layout.len())
+        }
     }
 
     /// Append a new expression to the module.
     fn push(&mut self, expr: impl Into<Expr>) -> ExprHandle {
-        #[allow(unsafe_code)]
-        let index: Index = unsafe { NonZeroU32::new_unchecked(self.expressions.len() as u32 + 1) };
         self.expressions.push(expr.into());
-        ExprHandle::new(index)
+        #[allow(unsafe_code)]
+        unsafe {
+            ExprHandle::new_unchecked(self.expressions.len())
+        }
     }
 
     /// Build a literal expression and append it to the module.
@@ -224,9 +400,11 @@ impl Module {
     }
 
     /// Build a property expression and append it to the module.
+    ///
+    /// A property expression retrieves the value of the given property.
     #[inline]
-    pub fn prop(&mut self, property_name: impl Into<String>) -> ExprHandle {
-        self.push(Expr::Property(PropertyExpr::new(property_name)))
+    pub fn prop(&mut self, property: PropertyHandle) -> ExprHandle {
+        self.push(Expr::Property(PropertyExpr::new(property)))
     }
 
     /// Build a built-in expression and append it to the module.
@@ -265,6 +443,7 @@ impl Module {
     impl_module_unary!(exp2, Exp2);
     impl_module_unary!(floor, Floor);
     impl_module_unary!(fract, Fract);
+    impl_module_unary!(inverse_sqrt, InvSqrt);
     impl_module_unary!(length, Length);
     impl_module_unary!(log, Log);
     impl_module_unary!(log2, Log2);
@@ -274,6 +453,7 @@ impl Module {
     impl_module_unary!(saturate, Saturate);
     impl_module_unary!(sign, Sign);
     impl_module_unary!(sin, Sin);
+    impl_module_unary!(sqrt, Sqrt);
     impl_module_unary!(tan, Tan);
     impl_module_unary!(unpack4x8snorm, Unpack4x8snorm);
     impl_module_unary!(unpack4x8unorm, Unpack4x8unorm);
@@ -325,6 +505,8 @@ impl Module {
     impl_module_binary!(step, Step);
     impl_module_binary!(sub, Sub);
     impl_module_binary!(uniform, UniformRand);
+    impl_module_binary!(normal, NormalRand);
+    impl_module_binary!(vec2, Vec2);
 
     /// Build a ternary expression and append it to the module.
     ///
@@ -450,6 +632,11 @@ impl Module {
         let expr = self.get(expr).unwrap();
         expr.has_side_effect(self)
     }
+
+    /// Get the texture layout of this module.
+    pub fn texture_layout(&self) -> TextureLayout {
+        self.texture_layout.clone()
+    }
 }
 
 /// Errors raised when manipulating expressions [`Expr`] and node graphs
@@ -475,12 +662,8 @@ pub enum ExprError {
     /// Error resolving a property.
     ///
     /// An unknown property was not defined in the evaluation context, which
-    /// usually means that the property was not defined
-    /// with [`EffectAsset::with_property()`] or
-    /// [`EffectAsset::add_property()`].
-    ///
-    /// [`EffectAsset::with_property()`]: crate::EffectAsset::with_property
-    /// [`EffectAsset::add_property()`]: crate::EffectAsset::add_property
+    /// usually means that the property was not defined with
+    /// [`Module::add_property()`].
     #[error("Property error: {0:?}")]
     PropertyError(String),
 
@@ -494,18 +677,27 @@ pub enum ExprError {
     /// [`EffectAsset`]: crate::EffectAsset
     #[error("Invalid expression handle: {0:?}")]
     InvalidExprHandleError(String),
+
+    /// Invalid modifier context.
+    ///
+    /// The operation was expecting a given [`ModifierContext`], but instead
+    /// another [`ModifierContext`] was available.
+    #[error("Invalid modifier context {0}, expected {1} instead.")]
+    InvalidModifierContext(ModifierContext, ModifierContext),
 }
 
 /// Evaluation context for transforming expressions into WGSL code.
 ///
 /// The evaluation context references a [`Module`] storing all [`Expr`] in use,
-/// as well as a [`PropertyLayout`] defining existing properties and their
-/// layout in memory. These together define the context within which expressions
-/// are evaluated.
+/// as well as a [`ParticleLayout`] defining the existing attributes of each
+/// particle and their layout in memory, and a [`PropertyLayout`] defining
+/// existing properties and their layout in memory. These together define the
+/// context within which expressions are evaluated.
 ///
 /// A same expression can be valid in one context and invalid in another. The
-/// most common example are [`PropertyExpr`] which are only valid if the
-/// property is actually defined in the evaluation context.
+/// most obvious example is a [`PropertyExpr`] which is only valid if the
+/// property is actually defined in the property layout of the evaluation
+/// context.
 pub trait EvalContext {
     /// Get the modifier context of the evaluation.
     fn modifier_context(&self) -> ModifierContext;
@@ -530,6 +722,10 @@ pub trait EvalContext {
     /// Each time this function is called, a new unique name is generated. The
     /// name is guaranteed to be unique within the current evaluation context
     /// only. Do not use for global top-level identifiers.
+    ///
+    /// The variable name is not registered automatically in the [`Module`]. If
+    /// you call `make_local_var()` but doesn't use the returned name, it won't
+    /// appear in the shader.
     fn make_local_var(&mut self) -> String;
 
     /// Push an intermediate statement during an evaluation.
@@ -546,9 +742,9 @@ pub trait EvalContext {
     /// [`Module`]. The function takes a list of arguments `args`, which are
     /// copied verbatim into the shader code without any validation. The body of
     /// the function is generated by invoking the given closure once with the
-    /// input `module` and a temporary `EvalContext` local to the function. The
-    /// closure must return the generated shader code of the function body. Any
-    /// statement pushed to the temporary function context with
+    /// input `module` and a temporary [`EvalContext`] local to the function.
+    /// The closure must return the generated shader code of the function
+    /// body. Any statement pushed to the temporary function context with
     /// [`EvalContext::push_stmt()`] is emitted inside the function body before
     /// the returned code. The function can subsequently be called from the
     /// parent context by generating code to call `func_name`, with the correct
@@ -572,7 +768,7 @@ pub trait EvalContext {
 }
 
 /// Language expression producing a value.
-#[derive(Debug, Clone, PartialEq, Hash, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Hash, Reflect, Serialize, Deserialize)]
 pub enum Expr {
     /// Built-in expression ([`BuiltInExpr`]).
     ///
@@ -639,6 +835,12 @@ pub enum Expr {
     ///
     /// An expression to cast an expression to another type.
     Cast(CastExpr),
+
+    /// Access to textures.
+    ///
+    /// An expression to sample a texture from the effect's material. Currently
+    /// only color textures (returning a `vec4<f32>`) are supported.
+    TextureSample(TextureSampleExpr),
 }
 
 impl Expr {
@@ -658,13 +860,14 @@ impl Expr {
     ///
     /// ```
     /// # use bevy_hanabi::*;
-    /// # let module = Module::default();
+    /// # let mut module = Module::default();
     /// // Literals are always constant by definition.
     /// assert!(Expr::Literal(LiteralExpr::new(1.)).is_const(&module));
     ///
     /// // Properties and attributes are never constant, since they're by definition used
     /// // to provide runtime customization.
-    /// assert!(!Expr::Property(PropertyExpr::new("my_prop")).is_const(&module));
+    /// let prop = module.add_property("my_property", 3.0.into());
+    /// assert!(!Expr::Property(PropertyExpr::new(prop)).is_const(&module));
     /// assert!(!Expr::Attribute(AttributeExpr::new(Attribute::POSITION)).is_const(&module));
     /// ```
     pub fn is_const(&self, module: &Module) -> bool {
@@ -682,6 +885,7 @@ impl Expr {
                 ..
             } => module.is_const(*first) && module.is_const(*second) && module.is_const(*third),
             Expr::Cast(expr) => module.is_const(expr.inner),
+            Expr::TextureSample(_) => false,
         }
     }
 
@@ -698,7 +902,7 @@ impl Expr {
             Expr::Attribute(_) => false,
             Expr::Unary { expr, .. } => module.has_side_effect(*expr),
             Expr::Binary { left, right, op } => {
-                (*op == BinaryOperator::UniformRand)
+                (*op == BinaryOperator::UniformRand || *op == BinaryOperator::NormalRand)
                     || module.has_side_effect(*left)
                     || module.has_side_effect(*right)
             }
@@ -713,6 +917,7 @@ impl Expr {
                     || module.has_side_effect(*third)
             }
             Expr::Cast(expr) => module.has_side_effect(expr.inner),
+            Expr::TextureSample(_) => false,
         }
     }
 
@@ -728,7 +933,10 @@ impl Expr {
     /// # use bevy_hanabi::*;
     /// // Literal expressions always have a constant, build-time value type.
     /// let expr = Expr::Literal(LiteralExpr::new(1.));
-    /// assert_eq!(expr.value_type(), Some(ValueType::Scalar(ScalarType::Float)));
+    /// assert_eq!(
+    ///     expr.value_type(),
+    ///     Some(ValueType::Scalar(ScalarType::Float))
+    /// );
     /// ```
     ///
     /// [`eval()`]: crate::graph::Expr::eval
@@ -742,6 +950,7 @@ impl Expr {
             Expr::Binary { .. } => None,
             Expr::Ternary { .. } => None,
             Expr::Cast(expr) => Some(expr.value_type()),
+            Expr::TextureSample(expr) => Some(expr.value_type()),
         }
     }
 
@@ -761,7 +970,7 @@ impl Expr {
     /// let mut module = Module::default();
     /// # let pl = PropertyLayout::empty();
     /// # let pal = ParticleLayout::default();
-    /// # let mut context = InitContext::new(&pl, &pal);
+    /// # let mut context = ShaderWriter::new(ModifierContext::Update, &pl, &pal);
     /// let handle = module.lit(1.);
     /// let expr = module.get(handle).unwrap();
     /// assert_eq!(Ok("1.".to_string()), expr.eval(&module, &mut context));
@@ -774,7 +983,7 @@ impl Expr {
         match self {
             Expr::BuiltIn(expr) => expr.eval(context),
             Expr::Literal(expr) => expr.eval(context),
-            Expr::Property(expr) => expr.eval(context),
+            Expr::Property(expr) => expr.eval(module, context),
             Expr::Attribute(expr) => expr.eval(context),
             Expr::Unary { op, expr } => {
                 // Recursively evaluate child expressions throught the context to ensure caching
@@ -795,8 +1004,8 @@ impl Expr {
             }
             Expr::Binary { op, left, right } => {
                 // Recursively evaluate child expressions throught the context to ensure caching
-                let left = context.eval(module, *left)?;
-                let right = context.eval(module, *right)?;
+                let compiled_left = context.eval(module, *left)?;
+                let compiled_right = context.eval(module, *right)?;
 
                 // if !self.input.value_type().is_vector() {
                 //     return Err(ExprError::TypeError(format!(
@@ -805,11 +1014,60 @@ impl Expr {
                 //     )));
                 // }
 
-                Ok(if op.is_functional() {
-                    format!("{}({}, {})", op.to_wgsl_string(), left, right)
+                if op.is_functional() {
+                    if op.needs_type_suffix() {
+                        let lhs_type = module.get(*left).and_then(|arg| arg.value_type());
+                        let rhs_type = module.get(*right).and_then(|arg| arg.value_type());
+                        if lhs_type.is_none() || rhs_type.is_none() {
+                            return Err(ExprError::TypeError(
+                                "Can't determine the type of the operand".to_string(),
+                            ));
+                        }
+                        if lhs_type != rhs_type {
+                            return Err(ExprError::TypeError("Mismatched types".to_string()));
+                        }
+                        let value_type = lhs_type.unwrap();
+                        let suffix = match value_type {
+                            ValueType::Scalar(ScalarType::Float) => "f",
+                            ValueType::Vector(vector_type)
+                                if vector_type.elem_type() == ScalarType::Float =>
+                            {
+                                match vector_type.count() {
+                                    2 => "vec2",
+                                    3 => "vec3",
+                                    4 => "vec4",
+                                    _ => unreachable!(),
+                                }
+                            }
+                            _ => {
+                                // Add more types here as needed.
+                                return Err(ExprError::TypeError("Unsupported type".to_string()));
+                            }
+                        };
+
+                        Ok(format!(
+                            "{}_{}({}, {})",
+                            op.to_wgsl_string(),
+                            suffix,
+                            compiled_left,
+                            compiled_right
+                        ))
+                    } else {
+                        Ok(format!(
+                            "{}({}, {})",
+                            op.to_wgsl_string(),
+                            compiled_left,
+                            compiled_right
+                        ))
+                    }
                 } else {
-                    format!("({}) {} ({})", left, op.to_wgsl_string(), right)
-                })
+                    Ok(format!(
+                        "({}) {} ({})",
+                        compiled_left,
+                        op.to_wgsl_string(),
+                        compiled_right
+                    ))
+                }
             }
             Expr::Ternary {
                 op,
@@ -843,6 +1101,7 @@ impl Expr {
 
                 Ok(format!("{}({})", expr.target.to_wgsl_string(), inner))
             }
+            Expr::TextureSample(expr) => expr.eval(module, context),
         }
     }
 }
@@ -855,6 +1114,7 @@ impl Expr {
 ///
 /// [`is_const()`]: LiteralExpr::is_const
 #[derive(Debug, Clone, Copy, PartialEq, Hash, Reflect, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct LiteralExpr {
     value: Value,
 }
@@ -954,18 +1214,25 @@ impl From<Attribute> for AttributeExpr {
 }
 
 /// Expression representing the value of a property of an effect.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Reflect, Serialize, Deserialize)]
+///
+/// A property expression represents the value of the property at the time the
+/// expression appears. In shader, the expression yields a read from the
+/// property memory location.
+///
+/// To create a property to reference with an expression, use
+/// [`Module::add_property()`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, Serialize, Deserialize)]
+#[repr(transparent)]
+#[serde(transparent)]
 pub struct PropertyExpr {
-    property_name: String,
+    property: PropertyHandle,
 }
 
 impl PropertyExpr {
     /// Create a new property expression.
     #[inline]
-    pub fn new(property_name: impl Into<String>) -> Self {
-        Self {
-            property_name: property_name.into(),
-        }
+    pub fn new(property: PropertyHandle) -> Self {
+        Self { property }
     }
 
     /// Is the expression resulting in a compile-time constant which can be
@@ -975,27 +1242,21 @@ impl PropertyExpr {
     }
 
     /// Evaluate the expression in the given context.
-    fn eval(&self, context: &dyn EvalContext) -> Result<String, ExprError> {
-        if !context.property_layout().contains(&self.property_name) {
+    fn eval(&self, module: &Module, context: &dyn EvalContext) -> Result<String, ExprError> {
+        let prop = module
+            .get_property(self.property)
+            .ok_or(ExprError::PropertyError(format!(
+                "Unknown property handle {:?} in evaluation module.",
+                self.property
+            )))?;
+        if !context.property_layout().contains(prop.name()) {
             return Err(ExprError::PropertyError(format!(
-                "Unknown property '{}' in evaluation context.",
-                self.property_name
+                "Unknown property '{}' in evaluation layout.",
+                prop.name()
             )));
         }
 
-        Ok(self.to_wgsl_string())
-    }
-}
-
-impl ToWgslString for PropertyExpr {
-    fn to_wgsl_string(&self) -> String {
-        format!("properties.{}", self.property_name)
-    }
-}
-
-impl From<String> for PropertyExpr {
-    fn from(property_name: String) -> Self {
-        PropertyExpr::new(property_name)
+        Ok(format!("properties.{}", prop.name()))
     }
 }
 
@@ -1058,13 +1319,102 @@ impl CastExpr {
     }
 }
 
+/// Expression to sample a texture from the effect's material.
+///
+/// This currently supports only color textures, that is all textures which
+/// return a `vec4<f32>` when sampled. So this excludes depth textures, but
+/// includes single-channel (e.g. red) textures. See the WGSL specification for
+/// details.
+///
+/// This currently only samples with `textureSample()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, Serialize, Deserialize)]
+pub struct TextureSampleExpr {
+    /// The index of the image to sample. This is the texture slot defined in
+    /// the [`Module`]. The texture bound to the slot is defined in the
+    /// [`EffectMaterial`] component.
+    ///
+    /// [`EffectMaterial`]: crate::EffectMaterial
+    pub image: ExprHandle,
+    /// The coordinates to sample at.
+    pub coordinates: ExprHandle,
+}
+
+impl TextureSampleExpr {
+    /// Create a new texture sample expression.
+    #[inline]
+    pub fn new(image: ExprHandle, coordinates: ExprHandle) -> Self {
+        Self { image, coordinates }
+    }
+
+    /// Get the value type of the expression.
+    pub fn value_type(&self) -> ValueType {
+        // FIXME - depth textures return a single f32 when sampled
+        ValueType::Vector(VectorType::VEC4F)
+    }
+
+    /// Try to evaluate if the texture sample expression is valid.
+    ///
+    /// This only checks that the expressions exist in the module.
+    pub fn is_valid(&self, module: &Module) -> Option<bool> {
+        let Some(_image) = module.get(self.image) else {
+            return Some(false);
+        };
+        let Some(_coordinates) = module.get(self.coordinates) else {
+            return Some(false);
+        };
+        Some(true)
+    }
+
+    /// Evaluate the expression in the given context.
+    pub fn eval(
+        &self,
+        module: &Module,
+        context: &mut dyn EvalContext,
+    ) -> Result<String, ExprError> {
+        let image = module.try_get(self.image)?;
+        let image = image.eval(module, context)?;
+        let coordinates = module.try_get(self.coordinates)?;
+        let coordinates = coordinates.eval(module, context)?;
+        Ok(format!(
+            "textureSample(material_texture_{image}, material_sampler_{image}, {coordinates})",
+        ))
+    }
+}
+
 /// Built-in operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, Serialize, Deserialize)]
 pub enum BuiltInOperator {
     /// Current effect system simulation time since startup, in seconds.
+    ///
+    /// This is based on the
+    /// [`Time<EffectSimulation>`](crate::time::EffectSimulation) clock.
+    ///
+    /// Type: `f32`
     Time,
     /// Delta time, in seconds, since last effect system update.
+    ///
+    /// Type: `f32`
     DeltaTime,
+    /// Current virtual time since startup, in seconds.
+    ///
+    /// This is based on the [`Time<Virtual>`](bevy::time::Virtual) clock.
+    ///
+    /// Type: `f32`
+    VirtualTime,
+    /// Virtual delta time, in seconds, since last effect system update.
+    ///
+    /// Type: `f32`
+    VirtualDeltaTime,
+    /// Current real time since startup, in seconds.
+    ///
+    /// This is based on the [`Time<Time>`](bevy::time::Real) clock.
+    ///
+    /// Type: `f32`
+    RealTime,
+    /// Real delta time, in seconds, since last effect system update.
+    ///
+    /// Type: `f32`
+    RealDeltaTime,
     /// Random unit value of the given type.
     ///
     /// The type can be any scalar or vector type. Matrix types are not
@@ -1074,6 +1424,8 @@ pub enum BuiltInOperator {
     /// The random number generator is from [the PCG family] of PRNGs, and is
     /// implemented directly inside the shader, and running on the GPU
     /// exclusively. It's seeded by the [`Spawner`].
+    ///
+    /// Type: Same as its [`ValueType`].
     ///
     /// [the PCG family]: https://www.pcg-random.org/
     /// [`Spawner`]: crate::Spawner
@@ -1087,8 +1439,34 @@ pub enum BuiltInOperator {
     /// The value is initalized at the beginning of the fragment shader to the
     /// expression stored in [`AlphaMode::Mask`].
     ///
+    /// Type: `f32`
+    ///
     /// [`AlphaMode::Mask`]: crate::AlphaMode::Mask
     AlphaCutoff,
+    /// Alive flag for the particle.
+    ///
+    /// The alive flag is initialized at the beginning of the update pass:
+    /// - If the particle has both the [`Attribute::AGE`] and
+    ///   [`Attribute::LIFETIME`], then the initial value at the beginning of
+    ///   the update pass is `age < lifetime`.
+    /// - Otherwise, the initial value is `true`.
+    ///
+    /// At the end of the update pass, if the particle has both the
+    /// [`Attribute::AGE`] and   [`Attribute::LIFETIME`], then the flag is
+    /// re-evaluated as:
+    ///
+    /// ```wgsl
+    /// is_alive = is_alive && (particle.age < particle.lifetime);
+    /// ```
+    ///
+    /// If the flag is `false` after that, the particle is considered dead and
+    /// it's deallocated.
+    ///
+    /// This flag is only available in the update pass. Attempting to use it
+    /// inside either the init or render passes will generate an invalid shader.
+    ///
+    /// Type: `bool`
+    IsAlive,
 }
 
 impl BuiltInOperator {
@@ -1097,6 +1475,10 @@ impl BuiltInOperator {
         match self {
             BuiltInOperator::Time => "time",
             BuiltInOperator::DeltaTime => "delta_time",
+            BuiltInOperator::VirtualTime => "virtual_time",
+            BuiltInOperator::VirtualDeltaTime => "virtual_delta_time",
+            BuiltInOperator::RealTime => "real_time",
+            BuiltInOperator::RealDeltaTime => "real_delta_time",
             BuiltInOperator::Rand(value_type) => match value_type {
                 ValueType::Scalar(s) => match s {
                     ScalarType::Bool => "brand",
@@ -1124,6 +1506,7 @@ impl BuiltInOperator {
                 ValueType::Matrix(_) => panic!("Invalid BuiltInOperator::Rand(ValueType::Matrix)."),
             },
             BuiltInOperator::AlphaCutoff => "alpha_cutoff",
+            BuiltInOperator::IsAlive => "is_alive",
         }
     }
 
@@ -1132,8 +1515,13 @@ impl BuiltInOperator {
         match self {
             BuiltInOperator::Time => ValueType::Scalar(ScalarType::Float),
             BuiltInOperator::DeltaTime => ValueType::Scalar(ScalarType::Float),
+            BuiltInOperator::VirtualTime => ValueType::Scalar(ScalarType::Float),
+            BuiltInOperator::VirtualDeltaTime => ValueType::Scalar(ScalarType::Float),
+            BuiltInOperator::RealTime => ValueType::Scalar(ScalarType::Float),
+            BuiltInOperator::RealDeltaTime => ValueType::Scalar(ScalarType::Float),
             BuiltInOperator::Rand(value_type) => *value_type,
             BuiltInOperator::AlphaCutoff => ValueType::Scalar(ScalarType::Float),
+            BuiltInOperator::IsAlive => ValueType::Scalar(ScalarType::Bool),
         }
     }
 
@@ -1149,6 +1537,7 @@ impl ToWgslString for BuiltInOperator {
     fn to_wgsl_string(&self) -> String {
         match self {
             BuiltInOperator::Rand(_) => format!("{}()", self.name()),
+            BuiltInOperator::IsAlive => "is_alive".to_string(),
             _ => format!("sim_params.{}", self.name()),
         }
     }
@@ -1276,6 +1665,12 @@ pub enum UnaryOperator {
     /// floor(x)`, component-wise for vectors.
     Fract,
 
+    /// Inverse square root operator.
+    ///
+    /// Return the inverse square root of the floating-point operand (`1.0 /
+    /// sqrt(x)`), component-wise for vectors.
+    InvSqrt,
+
     /// Length operator.
     ///
     /// Return the length of a floating point scalar or vector. The "length" of
@@ -1340,6 +1735,12 @@ pub enum UnaryOperator {
     /// Sine operator.
     Sin,
 
+    /// Square root operator.
+    ///
+    /// Return the square root of the floating-point operand, component-wise for
+    /// vectors.
+    Sqrt,
+
     /// Tangent operator.
     Tan,
 
@@ -1403,6 +1804,7 @@ impl ToWgslString for UnaryOperator {
             UnaryOperator::Exp2 => "exp2".to_string(),
             UnaryOperator::Floor => "floor".to_string(),
             UnaryOperator::Fract => "fract".to_string(),
+            UnaryOperator::InvSqrt => "inverseSqrt".to_string(),
             UnaryOperator::Length => "length".to_string(),
             UnaryOperator::Log => "log".to_string(),
             UnaryOperator::Log2 => "log2".to_string(),
@@ -1412,6 +1814,7 @@ impl ToWgslString for UnaryOperator {
             UnaryOperator::Saturate => "saturate".to_string(),
             UnaryOperator::Sign => "sign".to_string(),
             UnaryOperator::Sin => "sin".to_string(),
+            UnaryOperator::Sqrt => "sqrt".to_string(),
             UnaryOperator::Tan => "tan".to_string(),
             UnaryOperator::Unpack4x8snorm => "unpack4x8snorm".to_string(),
             UnaryOperator::Unpack4x8unorm => "unpack4x8unorm".to_string(),
@@ -1544,6 +1947,23 @@ pub enum BinaryOperator {
     /// rank, and the result is a vector of that rank and same element
     /// scalar type.
     UniformRand,
+
+    /// Normal distribution random number operator.
+    ///
+    /// Returns a value generated by a fast non-cryptographically-secure
+    /// pseudo-random number generator (PRNG) whose statistical characteristics
+    /// are undefined and generally focused around speed. The random value is
+    /// normally distributed with mean given by the first operand and standard
+    /// deviation by the second, which must be numeric types. If the operands
+    /// are vectors, they must be of the same rank, and the result is a vector
+    /// of that rank and same element scalar type.
+    NormalRand,
+
+    /// Constructor for 2-element vectors.
+    ///
+    /// Given two scalar elements `x` and `y`, returns the vector consisting of
+    /// those two elements `(x, y)`.
+    Vec2,
 }
 
 impl BinaryOperator {
@@ -1570,8 +1990,24 @@ impl BinaryOperator {
             | BinaryOperator::Max
             | BinaryOperator::Min
             | BinaryOperator::Step
-            | BinaryOperator::UniformRand => true,
+            | BinaryOperator::UniformRand
+            | BinaryOperator::NormalRand
+            | BinaryOperator::Vec2 => true,
         }
+    }
+
+    /// Check if a binary operator needs a type suffix.
+    ///
+    /// This is currently just for `rand_uniform`
+    /// (`BinaryOperator::UniformRand`) and `rand_normal`
+    /// (`BinaryOperator::NormalRand`), which are functions we define ourselves.
+    /// WGSL doesn't support user-defined function overloading, so we need a
+    /// suffix to disambiguate the types.
+    pub fn needs_type_suffix(&self) -> bool {
+        matches!(
+            *self,
+            BinaryOperator::UniformRand | BinaryOperator::NormalRand
+        )
     }
 }
 
@@ -1594,6 +2030,8 @@ impl ToWgslString for BinaryOperator {
             BinaryOperator::Step => "step".to_string(),
             BinaryOperator::Sub => "-".to_string(),
             BinaryOperator::UniformRand => "rand_uniform".to_string(),
+            BinaryOperator::NormalRand => "rand_normal".to_string(),
+            BinaryOperator::Vec2 => "vec2".to_string(),
         }
     }
 }
@@ -1629,6 +2067,12 @@ pub enum TernaryOperator {
     ///
     /// The result is always a floating point scalar in \[0:1\].
     SmoothStep,
+
+    /// Constructor for 3-element vectors.
+    ///
+    /// Given three scalar elements `x`, `y`, and `z`, returns the vector
+    /// consisting of those three elements `(x, y, z)`.
+    Vec3,
 }
 
 impl ToWgslString for TernaryOperator {
@@ -1636,6 +2080,7 @@ impl ToWgslString for TernaryOperator {
         match *self {
             TernaryOperator::Mix => "mix".to_string(),
             TernaryOperator::SmoothStep => "smoothstep".to_string(),
+            TernaryOperator::Vec3 => "vec3".to_string(),
         }
     }
 }
@@ -1656,11 +2101,13 @@ impl ToWgslString for TernaryOperator {
 ///
 /// ```
 /// # use bevy_hanabi::*;
+/// # use bevy::prelude::*;
 /// // Create a writer
 /// let w = ExprWriter::new();
 ///
 /// // Create a new expression: max(5. + particle.position, properties.my_prop)
-/// let expr = (w.lit(5.) + w.attr(Attribute::POSITION)).max(w.prop("my_prop"));
+/// let prop = w.add_property("my_property", Vec3::ONE.into());
+/// let expr = (w.lit(5.) + w.attr(Attribute::POSITION)).max(w.prop(prop));
 ///
 /// // Finalize the expression and write it down into the `Module` as an `Expr`
 /// let expr: ExprHandle = expr.expr();
@@ -1669,8 +2116,8 @@ impl ToWgslString for TernaryOperator {
 /// let init_modifier = SetAttributeModifier::new(Attribute::LIFETIME, expr);
 ///
 /// // Create an EffectAsset with the modifier and the Module from the writer
-/// let effect = EffectAsset::new(1024, Spawner::rate(32_f32.into()), w.finish())
-///     .init(init_modifier);
+/// let effect =
+///     EffectAsset::new(1024, Spawner::rate(32_f32.into()), w.finish()).init(init_modifier);
 /// ```
 ///
 /// [`finish()`]: ExprWriter::finish
@@ -1707,6 +2154,17 @@ impl ExprWriter {
     /// [`EffectAsset`]: crate::EffectAsset
     pub fn from_module(module: Rc<RefCell<Module>>) -> Self {
         Self { module }
+    }
+
+    /// Add a new property.
+    ///
+    /// See [`Property`] for more details on what effect properties are.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a property with the same name already exists.
+    pub fn add_property(&self, name: impl Into<String>, default_value: Value) -> PropertyHandle {
+        self.module.borrow_mut().add_property(name, default_value)
     }
 
     /// Push a new expression into the writer.
@@ -1756,10 +2214,11 @@ impl ExprWriter {
     /// ```
     /// # use bevy_hanabi::*;
     /// let mut w = ExprWriter::new();
-    /// let x = w.prop("my_prop"); // x = properties.my_prop;
+    /// let prop = w.add_property("my_prop", 3.0.into());
+    /// let x = w.prop(prop); // x = properties.my_prop;
     /// ```
-    pub fn prop(&self, name: impl Into<String>) -> WriterExpr {
-        self.push(Expr::Property(PropertyExpr::new(name)))
+    pub fn prop(&self, handle: PropertyHandle) -> WriterExpr {
+        self.push(Expr::Property(PropertyExpr::new(handle)))
     }
 
     /// Create a new writer expression representing the current simulation time.
@@ -1885,9 +2344,12 @@ impl ExprWriter {
 /// ```
 /// # use bevy_hanabi::*;
 /// let mut w = ExprWriter::new();
+/// let my_prop = w.add_property("my_prop", 3.0.into());
 ///
 /// // x = max(-3.5 + 1., properties.my_prop) * 0.5 - particle.position;
-/// let x = (w.lit(-3.5) + w.lit(1.)).max(w.prop("my_prop")).mul(w.lit(0.5))
+/// let x = (w.lit(-3.5) + w.lit(1.))
+///     .max(w.prop(my_prop))
+///     .mul(w.lit(0.5))
 ///     .sub(w.attr(Attribute::POSITION));
 ///
 /// let handle: ExprHandle = x.expr();
@@ -2119,6 +2581,30 @@ impl WriterExpr {
         self.unary_op(UnaryOperator::Fract)
     }
 
+    /// Apply the "inverseSqrt" (inverse square root) operator to the current
+    /// float scalar or vector expression.
+    ///
+    /// This is a unary operator, which applies to float scalar or vector
+    /// operand expressions to produce a float scalar or vector. It applies
+    /// component-wise to vector operand expressions.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use bevy_hanabi::*;
+    /// # use bevy::math::Vec3;
+    /// # let mut w = ExprWriter::new();
+    /// // A literal expression `x = vec3<f32>(1., 1., 1.);`.
+    /// let x = w.lit(Vec3::ONE);
+    ///
+    /// // Inverse square root: `y = inverseSqrt(x) = 1.0 / sqrt(x);`
+    /// let y = x.inverse_sqrt();
+    /// ```
+    #[inline]
+    pub fn inverse_sqrt(self) -> Self {
+        self.unary_op(UnaryOperator::InvSqrt)
+    }
+
     /// Apply the "length" operator to the current float scalar or vector
     /// expression.
     ///
@@ -2306,6 +2792,30 @@ impl WriterExpr {
     #[inline]
     pub fn sin(self) -> Self {
         self.unary_op(UnaryOperator::Sin)
+    }
+
+    /// Apply the "sqrt" (square root) operator to the current float scalar or
+    /// vector expression.
+    ///
+    /// This is a unary operator, which applies to float scalar or vector
+    /// operand expressions to produce a float scalar or vector. It applies
+    /// component-wise to vector operand expressions.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use bevy_hanabi::*;
+    /// # use bevy::math::Vec3;
+    /// # let mut w = ExprWriter::new();
+    /// // A literal expression `x = vec3<f32>(1., 1., 1.);`.
+    /// let x = w.lit(Vec3::ONE);
+    ///
+    /// // Square root: `y = sqrt(x);`
+    /// let y = x.sqrt();
+    /// ```
+    #[inline]
+    pub fn sqrt(self) -> Self {
+        self.unary_op(UnaryOperator::Sqrt)
     }
 
     /// Apply the "tan" operator to the current float scalar or vector
@@ -2516,8 +3026,8 @@ impl WriterExpr {
     ///
     /// // The sum of both vectors `z = x + y;`.
     /// let z = x.add(y); // == vec2<f32>(4., 3.)
-    /// // -OR-
-    /// // let z = x + y;
+    ///                   // -OR-
+    ///                   // let z = x + y;
     /// ```
     #[allow(clippy::should_implement_trait)]
     #[inline]
@@ -2624,8 +3134,8 @@ impl WriterExpr {
     ///
     /// // The quotient of both vectors `z = x / y;`.
     /// let z = x.div(y); // == vec2<f32>(3., -0.4)
-    /// // -OR-
-    /// // let z = x / y;
+    ///                   // -OR-
+    ///                   // let z = x / y;
     /// ```
     #[allow(clippy::should_implement_trait)]
     #[inline]
@@ -2809,8 +3319,8 @@ impl WriterExpr {
     ///
     /// // The product of both vectors `z = x * y;`.
     /// let z = x.mul(y); // == vec2<f32>(3., -10.)
-    /// // -OR-
-    /// // let z = x * y;
+    ///                   // -OR-
+    ///                   // let z = x * y;
     /// ```
     #[allow(clippy::should_implement_trait)]
     #[inline]
@@ -2893,8 +3403,8 @@ impl WriterExpr {
     ///
     /// // The difference of both vectors `z = x - y;`.
     /// let z = x.sub(y); // == vec2<f32>(2., -7.)
-    /// // -OR-
-    /// // let z = x - y;
+    ///                   // -OR-
+    ///                   // let z = x - y;
     /// ```
     #[allow(clippy::should_implement_trait)]
     #[inline]
@@ -2928,6 +3438,35 @@ impl WriterExpr {
     #[inline]
     pub fn uniform(self, other: Self) -> Self {
         self.binary_op(other, BinaryOperator::UniformRand)
+    }
+
+    /// Apply the logical operator "normal" to this expression and another
+    /// expression.
+    ///
+    /// This is a binary operator, which applies component-wise to vector
+    /// operand expressions. That is, for vectors, this produces a vector of
+    /// random values where each component is normally distributed with a mean
+    /// of the corresponding component of the first operand and a standard
+    /// deviation of the corresponding component of the second operand.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use bevy_hanabi::*;
+    /// # use bevy::math::Vec3;
+    /// # let mut w = ExprWriter::new();
+    /// // A literal expression `x = vec3<f32>(3., -2., 7.);`.
+    /// let x = w.lit(Vec3::new(3., -2., 7.));
+    ///
+    /// // Another literal expression `y = vec3<f32>(1., 5., 7.);`.
+    /// let y = w.lit(Vec3::new(1., 5., 7.));
+    ///
+    /// // A random variable normally distributed in [1:3]x[-2:5]x[7:7].
+    /// let z = x.normal(y);
+    /// ```
+    #[inline]
+    pub fn normal(self, other: Self) -> Self {
+        self.binary_op(other, BinaryOperator::NormalRand)
     }
 
     fn ternary_op(self, second: Self, third: Self, op: TernaryOperator) -> Self {
@@ -3005,6 +3544,40 @@ impl WriterExpr {
     pub fn smoothstep(self, low: Self, high: Self) -> Self {
         // Note: order is smoothstep(low, high, x) but x.smoothstep(low, high)
         low.ternary_op(high, self, TernaryOperator::SmoothStep)
+    }
+
+    /// Construct a `Vec2` from two scalars.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use bevy_hanabi::*;
+    /// # let mut w = ExprWriter::new();
+    /// let theta = w.add_property("theta", 0.0.into());
+    /// // Convert the angular property `theta` to a 2D vector.
+    /// let (cos_theta, sin_theta) = (w.prop(theta).cos(), w.prop(theta).sin());
+    /// let circle_pos = cos_theta.vec2(sin_theta);
+    /// ```
+    #[inline]
+    pub fn vec2(self, y: Self) -> Self {
+        self.binary_op(y, BinaryOperator::Vec2)
+    }
+
+    /// Construct a `Vec3` from two scalars.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use bevy_hanabi::*;
+    /// # let mut w = ExprWriter::new();
+    /// let theta = w.add_property("theta", 0.0.into());
+    /// // Convert the angular property `theta` to a 3D vector in a flat plane.
+    /// let (cos_theta, sin_theta) = (w.prop(theta).cos(), w.prop(theta).sin());
+    /// let circle_pos = cos_theta.vec3(w.lit(0.0), sin_theta);
+    /// ```
+    #[inline]
+    pub fn vec3(self, y: Self, z: Self) -> Self {
+        self.ternary_op(y, z, TernaryOperator::Vec3)
     }
 
     /// Cast an expression to a different type.
@@ -3099,16 +3672,17 @@ impl std::ops::Rem<WriterExpr> for WriterExpr {
 
 #[cfg(test)]
 mod tests {
-    use crate::{prelude::Property, InitContext, MatrixType, ScalarValue, VectorType};
+    use bevy::{prelude::*, utils::HashSet};
 
     use super::*;
-    use bevy::{prelude::*, utils::HashSet};
+    use crate::{MatrixType, ScalarValue, ShaderWriter, VectorType};
 
     #[test]
     fn module() {
         let mut m = Module::default();
 
-        let unknown = ExprHandle::new(NonZeroU32::new(1).unwrap());
+        #[allow(unsafe_code)]
+        let unknown = unsafe { ExprHandle::new_unchecked(1) };
         assert!(m.get(unknown).is_none());
         assert!(m.get_mut(unknown).is_none());
         assert!(matches!(
@@ -3132,7 +3706,8 @@ mod tests {
     fn local_var() {
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut ctx = InitContext::new(&property_layout, &particle_layout);
+        let mut ctx =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
         let mut h = HashSet::new();
         for _ in 0..100 {
             let v = ctx.make_local_var();
@@ -3144,7 +3719,8 @@ mod tests {
     fn make_fn() {
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut ctx = InitContext::new(&property_layout, &particle_layout);
+        let mut ctx =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
         let mut module = Module::default();
 
         // Make a function
@@ -3169,13 +3745,29 @@ mod tests {
     }
 
     #[test]
+    fn property() {
+        let mut m = Module::default();
+
+        let _my_prop = m.add_property("my_prop", Value::Scalar(345_u32.into()));
+        let _other_prop = m.add_property(
+            "other_prop",
+            Value::Vector(Vec3::new(3., -7.5, 42.42).into()),
+        );
+
+        assert!(m.properties().iter().any(|p| p.name() == "my_prop"));
+        assert!(m.properties().iter().any(|p| p.name() == "other_prop"));
+        assert!(!m.properties().iter().any(|p| p.name() == "do_not_exist"));
+    }
+
+    #[test]
     fn writer() {
         // Get a module and its writer
         let w = ExprWriter::new();
+        let my_prop = w.add_property("my_prop", 3.0.into());
 
         // Build some expression
         let x = w.lit(3.).abs().max(w.attr(Attribute::POSITION) * w.lit(2.))
-            + w.lit(-4.).min(w.prop("my_prop"));
+            + w.lit(-4.).min(w.prop(my_prop));
         let x = x.expr();
 
         // Create an evaluation context
@@ -3183,7 +3775,8 @@ mod tests {
             PropertyLayout::new(&[Property::new("my_prop", ScalarValue::Float(3.))]);
         let particle_layout = ParticleLayout::default();
         let m = w.finish();
-        let mut context = InitContext::new(&property_layout, &particle_layout);
+        let mut context =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
 
         // Evaluate the expression
         let x = m.try_get(x).unwrap();
@@ -3222,7 +3815,8 @@ mod tests {
 
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut ctx = InitContext::new(&property_layout, &particle_layout);
+        let mut ctx =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
 
         for (expr, op) in [
             (add, "+"),
@@ -3253,17 +3847,41 @@ mod tests {
     fn builtin_expr() {
         let mut m = Module::default();
 
-        for op in [BuiltInOperator::Time, BuiltInOperator::DeltaTime] {
+        // Simulation parameters
+        for op in [
+            BuiltInOperator::Time,
+            BuiltInOperator::DeltaTime,
+            BuiltInOperator::VirtualTime,
+            BuiltInOperator::VirtualDeltaTime,
+            BuiltInOperator::RealTime,
+            BuiltInOperator::RealDeltaTime,
+        ] {
             let value = m.builtin(op);
 
             let property_layout = PropertyLayout::default();
             let particle_layout = ParticleLayout::default();
-            let mut ctx = InitContext::new(&property_layout, &particle_layout);
+            let mut ctx =
+                ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
 
             let expr = ctx.eval(&m, value);
             assert!(expr.is_ok());
             let expr = expr.unwrap();
             assert_eq!(expr, format!("sim_params.{}", op.name()));
+        }
+
+        // is_alive
+        {
+            let value = m.builtin(BuiltInOperator::IsAlive);
+
+            let property_layout = PropertyLayout::default();
+            let particle_layout = ParticleLayout::default();
+            let mut ctx =
+                ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
+
+            let expr = ctx.eval(&m, value);
+            assert!(expr.is_ok());
+            let expr = expr.unwrap();
+            assert_eq!(expr, "is_alive");
         }
 
         // BuiltInOperator::Rand (which has side effect)
@@ -3279,13 +3897,14 @@ mod tests {
             {
                 let property_layout = PropertyLayout::default();
                 let particle_layout = ParticleLayout::default();
-                let mut ctx = InitContext::new(&property_layout, &particle_layout);
+                let mut ctx =
+                    ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
 
                 let expr = ctx.eval(&m, value);
                 assert!(expr.is_ok());
                 let expr = expr.unwrap();
                 assert_eq!(expr, "var0");
-                assert_eq!(ctx.init_code, format!("let var0 = {}rand();\n", prefix));
+                assert_eq!(ctx.main_code, format!("let var0 = {}rand();\n", prefix));
             }
 
             // Vector form
@@ -3296,14 +3915,15 @@ mod tests {
 
                 let property_layout = PropertyLayout::default();
                 let particle_layout = ParticleLayout::default();
-                let mut ctx = InitContext::new(&property_layout, &particle_layout);
+                let mut ctx =
+                    ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
 
                 let expr = ctx.eval(&m, vec);
                 assert!(expr.is_ok());
                 let expr = expr.unwrap();
                 assert_eq!(expr, "var0");
                 assert_eq!(
-                    ctx.init_code,
+                    ctx.main_code,
                     format!("let var0 = {}rand{}();\n", prefix, count)
                 );
             }
@@ -3331,6 +3951,7 @@ mod tests {
         let exp2 = m.exp2(y);
         let floor = m.floor(y);
         let fract = m.fract(y);
+        let inv_sqrt = m.inverse_sqrt(y);
         let length = m.length(y);
         let log = m.log(y);
         let log2 = m.log2(y);
@@ -3340,6 +3961,7 @@ mod tests {
         let saturate = m.saturate(y);
         let sign = m.sign(y);
         let sin = m.sin(y);
+        let sqrt = m.sqrt(y);
         let tan = m.tan(y);
         let unpack4x8snorm = m.unpack4x8snorm(us);
         let unpack4x8unorm = m.unpack4x8unorm(uu);
@@ -3350,7 +3972,8 @@ mod tests {
 
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut ctx = InitContext::new(&property_layout, &particle_layout);
+        let mut ctx =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
 
         for (expr, op, inner) in [
             (
@@ -3366,6 +3989,7 @@ mod tests {
             (exp2, "exp2", "vec3<f32>(1.,-3.1,6.99)"),
             (floor, "floor", "vec3<f32>(1.,-3.1,6.99)"),
             (fract, "fract", "vec3<f32>(1.,-3.1,6.99)"),
+            (inv_sqrt, "inverseSqrt", "vec3<f32>(1.,-3.1,6.99)"),
             (length, "length", "vec3<f32>(1.,-3.1,6.99)"),
             (log, "log", "vec3<f32>(1.,-3.1,6.99)"),
             (log2, "log2", "vec3<f32>(1.,-3.1,6.99)"),
@@ -3375,9 +3999,10 @@ mod tests {
             (saturate, "saturate", "vec3<f32>(1.,-3.1,6.99)"),
             (sign, "sign", "vec3<f32>(1.,-3.1,6.99)"),
             (sin, "sin", "vec3<f32>(1.,-3.1,6.99)"),
+            (sqrt, "sqrt", "vec3<f32>(1.,-3.1,6.99)"),
             (tan, "tan", "vec3<f32>(1.,-3.1,6.99)"),
-            (unpack4x8snorm, "unpack4x8snorm", "0"),
-            (unpack4x8unorm, "unpack4x8unorm", "0"),
+            (unpack4x8snorm, "unpack4x8snorm", "0u"),
+            (unpack4x8unorm, "unpack4x8unorm", "0u"),
         ] {
             let expr = ctx.eval(&m, expr);
             assert!(expr.is_ok());
@@ -3414,7 +4039,8 @@ mod tests {
 
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut ctx = InitContext::new(&property_layout, &particle_layout);
+        let mut ctx =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
 
         for (expr, op) in [
             (cross, "cross"),
@@ -3451,7 +4077,8 @@ mod tests {
 
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut ctx = InitContext::new(&property_layout, &particle_layout);
+        let mut ctx =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
 
         for (expr, op, third) in [(mix, "mix", t), (smoothstep, "smoothstep", x)] {
             let expr = ctx.eval(&m, expr);
@@ -3486,7 +4113,8 @@ mod tests {
 
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut ctx = InitContext::new(&property_layout, &particle_layout);
+        let mut ctx =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
 
         for (expr, cast, target) in [
             (x, cx, ValueType::Vector(VectorType::VEC3I)),
@@ -3511,7 +4139,8 @@ mod tests {
 
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut ctx = InitContext::new(&property_layout, &particle_layout);
+        let mut ctx =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
 
         let res = ctx.eval(&m, x);
         assert!(res.is_ok());
@@ -3520,7 +4149,9 @@ mod tests {
 
         // Use a different context; it's invalid to reuse a mutated context, as the
         // expression cache will have been generated with the wrong context.
-        let mut ctx = InitContext::new(&property_layout, &particle_layout).with_attribute_pointer();
+        let mut ctx =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout)
+                .with_attribute_pointer();
 
         let res = ctx.eval(&m, x);
         assert!(res.is_ok());
@@ -3582,7 +4213,8 @@ mod tests {
         assert_eq!(c.value_type(), ValueType::Scalar(ScalarType::Bool));
         assert_eq!(c.is_valid(&m), Some(false)); // invalid cast vector -> scalar
 
-        let y = m.prop("my_prop");
+        let p = m.add_property("my_prop", 3.0.into());
+        let y = m.prop(p);
         let c = CastExpr::new(y, MatrixType::MAT2X3F);
         assert_eq!(c.value_type(), ValueType::Matrix(MatrixType::MAT2X3F));
         assert_eq!(c.is_valid(&m), None); // properties' value_type() is unknown
@@ -3610,28 +4242,31 @@ mod tests {
         {
             let property_layout = PropertyLayout::default();
             let particle_layout = ParticleLayout::default();
-            let mut ctx = InitContext::new(&property_layout, &particle_layout);
+            let mut ctx =
+                ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
             let value = ctx.eval(&m, a).unwrap();
             assert_eq!(value, "(var0) + (var0)");
-            assert_eq!(ctx.init_code, "let var0 = frand();\n");
+            assert_eq!(ctx.main_code, "let var0 = frand();\n");
         }
 
         {
             let property_layout = PropertyLayout::default();
             let particle_layout = ParticleLayout::default();
-            let mut ctx = InitContext::new(&property_layout, &particle_layout);
+            let mut ctx =
+                ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
             let value = ctx.eval(&m, b).unwrap();
             assert_eq!(value, "mix(var0, var0, var0)");
-            assert_eq!(ctx.init_code, "let var0 = frand();\n");
+            assert_eq!(ctx.main_code, "let var0 = frand();\n");
         }
 
         {
             let property_layout = PropertyLayout::default();
             let particle_layout = ParticleLayout::default();
-            let mut ctx = InitContext::new(&property_layout, &particle_layout);
+            let mut ctx =
+                ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
             let value = ctx.eval(&m, c).unwrap();
             assert_eq!(value, "abs((var0) + (var0))");
-            assert_eq!(ctx.init_code, "let var0 = frand();\n");
+            assert_eq!(ctx.main_code, "let var0 = frand();\n");
         }
     }
 

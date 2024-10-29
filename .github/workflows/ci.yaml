@@ -16,6 +16,7 @@ on:
   push:
     branches:
       - main
+      - hotfix/*
   # Enable manual trigger via GitHub UI
   workflow_dispatch:
 
@@ -23,12 +24,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+
   build:
     strategy:
       matrix:
         dimensions: [2d, 3d, all]
-        toolchain: [stable] #, nightly]
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install Bevy dependencies
@@ -37,45 +38,80 @@ jobs:
           DEBIAN_FRONTEND=noninteractive sudo apt-get install --no-install-recommends -yq \
             libasound2-dev libudev-dev;
         if: runner.os == 'linux'
-      - name: Install graphic drivers
-        run: |
-          sudo apt-get update -y -qq
-          sudo add-apt-repository ppa:kisak/kisak-mesa -y
-          sudo apt-get update
-          sudo apt install -y xvfb libegl1-mesa libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
-        if: runner.os == 'linux'
-      - uses: actions/checkout@v2
-      - uses: actions/cache@v2
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
             target/
-          key: ${{ runner.os }}-cargo-build-${{ matrix.dimensions }}-${{ matrix.toolchain }}-${{ hashFiles('**/Cargo.toml') }}
-      - uses: actions-rs/toolchain@v1
+          key: ${{ runner.os }}-cargo-build-${{ matrix.dimensions }}-stable-${{ hashFiles('**/Cargo.toml') }}
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
-          override: true
-      - name: Build & run tests
-        run: cargo test --no-default-features --features ${{ matrix.dimensions }}
-        env:
-          CARGO_INCREMENTAL: 0
-        if: matrix.dimensions != 'all'
-      - name: Build & run GPU tests
-        run: cargo test --no-default-features --features ${{ matrix.dimensions }} --features gpu_tests
+      - name: Build & run lib tests (${{ matrix.dimensions }} no GPU)
+        run: cargo test --lib --no-default-features --features ${{ matrix.dimensions }} --features serde
         env:
           CARGO_INCREMENTAL: 0
         if: runner.os == 'linux' && matrix.dimensions != 'all'
-      - name: Build & run tests
-        run: cargo test --no-default-features --features="2d 3d"
+      - name: Build & run lib tests (${{ matrix.dimensions }} DX12)
+        shell: bash
+        run: WGPU_BACKEND=dx12 cargo test --lib --no-default-features --features ${{ matrix.dimensions }} --features serde,gpu_tests
         env:
           CARGO_INCREMENTAL: 0
-        if: matrix.dimensions == 'all'
+        if: runner.os == 'windows' && matrix.dimensions != 'all'
+      - name: Build & run all tests (${{ matrix.dimensions }} METAL)
+        shell: bash
+        run: WGPU_BACKEND=metal cargo test --no-default-features --features ${{ matrix.dimensions }} --features serde,gpu_tests
+        env:
+          CARGO_INCREMENTAL: 0
+        if: runner.os == 'macos' && matrix.dimensions != 'all'
+      - name: Build & run lib tests (all no GPU)
+        run: cargo test --lib --no-default-features --features "2d 3d serde"
+        env:
+          CARGO_INCREMENTAL: 0
+        if: runner.os == 'linux' && matrix.dimensions == 'all'
+      - name: Build & run lib tests (all DX12)
+        shell: bash
+        run: WGPU_BACKEND=dx12 cargo test --lib --no-default-features --features "2d 3d serde gpu_tests"
+        env:
+          CARGO_INCREMENTAL: 0
+        if: runner.os == 'windows' && matrix.dimensions == 'all'
+      - name: Build & run all tests (all METAL)
+        shell: bash
+        run: WGPU_BACKEND=metal cargo test --no-default-features --features "2d 3d serde gpu_tests"
+        env:
+          CARGO_INCREMENTAL: 0
+        if: runner.os == 'macos' && matrix.dimensions == 'all'
 
-  run-examples:
+  build-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            target/
+          key: ubuntu-cargo-build-wasm-stable-${{ hashFiles('**/Cargo.toml') }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+      - name: Check wasm
+        run: cargo check --target wasm32-unknown-unknown --no-default-features --features 2d,3d
+
+  msrv:
     runs-on: ubuntu-latest
     steps:
       - name: Install Bevy dependencies
@@ -83,13 +119,8 @@ jobs:
           sudo apt-get update;
           DEBIAN_FRONTEND=noninteractive sudo apt-get install --no-install-recommends -yq \
             libasound2-dev libudev-dev;
-      - name: Install graphic drivers
-        run: |
-          sudo apt-get update -y -qq
-          sudo add-apt-repository ppa:kisak/kisak-mesa -y
-          sudo apt-get update
-          sudo apt install -y xvfb libegl1-mesa libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
-      - uses: actions/checkout@v2
+        if: runner.os == 'linux'
+      - uses: actions/checkout@v4
       - uses: actions/cache@v2
         with:
           path: |
@@ -97,35 +128,98 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            target/
+          key: ${{ runner.os }}-cargo-build-msrv-stable-${{ hashFiles('**/Cargo.toml') }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.79
+          components: rustfmt, clippy
+      - name: Check
+        run: cargo check --lib --all-features
+        env:
+          CARGO_INCREMENTAL: 0
+
+  run-examples:
+    #runs-on: ubuntu-latest # Bug: Library libxkbcommon-x11.so could not be loaded.
+    runs-on: windows-latest
+    steps:
+      - name: Install Bevy dependencies
+        run: |
+          sudo apt-get update;
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install --no-install-recommends -yq \
+            libasound2-dev libudev-dev;
+        if: runner.os == 'linux'
+      # - name: Install graphic drivers
+      #   run: |
+      #     sudo apt-get update -y -qq
+      #     sudo add-apt-repository ppa:kisak/kisak-mesa -y
+      #     sudo apt-get update
+      #     sudo apt install -y xvfb libegl1-mesa libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
+      #   if: runner.os == 'linux'
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
             target/
           key: ${{ runner.os }}-cargo-build-all-stable-${{ hashFiles('**/Cargo.toml') }}
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           components: rustfmt, clippy
-          override: true
-      - name: Build & run examples
+      - name: Build & run examples (Linux)
         run: |
           for example in .github/example-run/3d/*.ron; do
             example_name=`basename $example .ron`
             echo "running $example_name - "`date`
-            time CI_TESTING_CONFIG=$example xvfb-run cargo run --example $example_name --no-default-features --features="bevy/bevy_winit bevy/bevy_pbr 3d bevy/bevy_ci_testing"
+            time CI_TESTING_CONFIG=$example xvfb-run cargo run --example $example_name --no-default-features --features="bevy/bevy_winit bevy/bevy_pbr bevy/bevy_ui bevy/default_font 3d serde bevy/bevy_ci_testing"
             sleep 10
           done
           for example in .github/example-run/3dpng/*.ron; do
             example_name=`basename $example .ron`
             echo "running $example_name - "`date`
-            time CI_TESTING_CONFIG=$example xvfb-run cargo run --example $example_name --no-default-features --features="bevy/bevy_winit bevy/bevy_pbr bevy/png 3d bevy/bevy_ci_testing"
+            time CI_TESTING_CONFIG=$example xvfb-run cargo run --example $example_name --no-default-features --features="bevy/bevy_winit bevy/bevy_pbr bevy/bevy_ui bevy/default_font bevy/png 3d serde bevy/bevy_ci_testing"
             sleep 10
           done
           for example in .github/example-run/2d/*.ron; do
             example_name=`basename $example .ron`
             echo "running $example_name - "`date`
-            time CI_TESTING_CONFIG=$example xvfb-run cargo run --example $example_name --no-default-features --features="bevy/bevy_winit bevy/bevy_sprite 2d bevy/bevy_ci_testing"
+            time CI_TESTING_CONFIG=$example xvfb-run cargo run --example $example_name --no-default-features --features="bevy/bevy_winit bevy/bevy_sprite bevy/bevy_ui bevy/default_font 2d serde bevy/bevy_ci_testing"
             sleep 10
           done
         env:
           CARGO_INCREMENTAL: 0
+        if: runner.os == 'linux'
+      - name: Build & run examples (Windows)
+        shell: bash
+        run: |
+          for example in .github/example-run/3d/*.ron; do
+            example_name=`basename $example .ron`
+            echo "running $example_name - "`date`
+            time WGPU_BACKEND=dx12 CI_TESTING_CONFIG=$example cargo run --example $example_name --no-default-features --features="bevy/bevy_winit bevy/bevy_pbr bevy/bevy_ui bevy/default_font 3d serde bevy/bevy_ci_testing"
+            sleep 10
+          done
+          for example in .github/example-run/3dpng/*.ron; do
+            example_name=`basename $example .ron`
+            echo "running $example_name - "`date`
+            time WGPU_BACKEND=dx12 CI_TESTING_CONFIG=$example cargo run --example $example_name --no-default-features --features="bevy/bevy_winit bevy/bevy_pbr bevy/bevy_ui bevy/default_font bevy/png 3d serde bevy/bevy_ci_testing"
+            sleep 10
+          done
+          for example in .github/example-run/2d/*.ron; do
+            example_name=`basename $example .ron`
+            echo "running $example_name - "`date`
+            time WGPU_BACKEND=dx12 CI_TESTING_CONFIG=$example cargo run --example $example_name --no-default-features --features="bevy/bevy_winit bevy/bevy_sprite bevy/bevy_ui bevy/default_font 2d serde bevy/bevy_ci_testing"
+            sleep 10
+          done
+        env:
+          CARGO_INCREMENTAL: 0
+        if: runner.os == 'windows'
 
   check-format:
     name: Check format
@@ -136,21 +230,21 @@ jobs:
           sudo apt-get update;
           DEBIAN_FRONTEND=noninteractive sudo apt-get install --no-install-recommends -yq \
             libasound2-dev libudev-dev;
-      - uses: actions/checkout@v2
-      - uses: actions/cache@v2
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
             target/
           key: ${{ runner.os }}-cargo-build-all-stable-${{ hashFiles('**/Cargo.toml') }}
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           components: rustfmt, clippy
-          override: true
       - name: Check format
         run: cargo fmt --all -- --check
         env:
@@ -162,16 +256,17 @@ jobs:
 
   coverage:
     name: Coverage
-    runs-on: ubuntu-latest
+    #runs-on: ubuntu-latest
+    runs-on: macos-14
     permissions:
       actions: read
       checks: write
     steps:
-      - name: Install Bevy dependencies
-        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
-        if: runner.os == 'linux'
-      - uses: actions/checkout@v2
-      - uses: actions/cache@v2
+      # - name: Install Bevy dependencies
+      #   run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      #   if: runner.os == 'linux'
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -182,20 +277,19 @@ jobs:
             ~/.cargo/.crates2.json
             target/
           key: ${{ runner.os }}-cargo-build-all-stable-${{ hashFiles('**/Cargo.toml') }}
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
-      - name: Install graphic drivers
-        run: |
-          sudo apt-get update -y -qq
-          sudo add-apt-repository ppa:kisak/kisak-mesa -y
-          sudo apt-get update
-          sudo apt install -y xvfb libegl1-mesa libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
-        if: runner.os == 'linux'
+          components: rustfmt, clippy
+      # - name: Install graphic drivers
+      #   run: |
+      #     sudo apt-get update -y -qq
+      #     sudo add-apt-repository ppa:kisak/kisak-mesa -y
+      #     sudo apt-get update
+      #     sudo apt install -y xvfb libegl1-mesa libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
+      #   if: runner.os == 'linux'
       - name: Install cargo-tarpaulin
         run: |
-          RUST_BACKTRACE=1 cargo install --version 0.22.0 cargo-tarpaulin
+          RUST_BACKTRACE=1 cargo install --version 0.31.2 cargo-tarpaulin
       - name: Generate code coverage
         run: |
           RUST_BACKTRACE=1 cargo tarpaulin --engine llvm --verbose --timeout 120 --out Lcov --workspace --all-features

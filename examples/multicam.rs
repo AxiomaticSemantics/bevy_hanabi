@@ -1,43 +1,23 @@
+use std::f32::consts::FRAC_PI_2;
+
 use bevy::{
-    core_pipeline::{clear_color::ClearColorConfig, tonemapping::Tonemapping},
-    log::LogPlugin,
+    core_pipeline::tonemapping::Tonemapping,
     math::EulerRot,
     prelude::*,
-    render::{
-        camera::Viewport,
-        mesh::shape::{Cube, Plane},
-        view::RenderLayers,
-    },
+    render::{camera::Viewport, view::RenderLayers},
     window::WindowResized,
 };
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
-
 use bevy_hanabi::prelude::*;
 
-fn main() {
-    App::default()
-        .add_plugins(
-            DefaultPlugins
-                .set(LogPlugin {
-                    level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,multicam=trace".to_string(),
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "🎆 Hanabi — multicam".to_string(),
-                        ..default()
-                    }),
-                    ..default()
-                }),
-        )
-        .add_plugins(HanabiPlugin)
-        .add_plugins(WorldInspectorPlugin::default())
+mod utils;
+use utils::*;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let app_exit = utils::make_test_app("multicam")
         .add_systems(Startup, setup)
-        .add_systems(
-            Update,
-            (bevy::window::close_on_esc, update_camera_viewports),
-        )
+        .add_systems(Update, update_camera_viewports)
         .run();
+    app_exit.into_result()
 }
 
 #[derive(Component)]
@@ -55,7 +35,15 @@ fn make_effect(color: Color) -> EffectAsset {
 
     let mut color_gradient = Gradient::new();
     color_gradient.add_key(0.0, Vec4::splat(1.0));
-    color_gradient.add_key(0.4, Vec4::new(color.r(), color.g(), color.b(), 1.0));
+    color_gradient.add_key(
+        0.4,
+        Vec4::new(
+            color.to_linear().red,
+            color.to_linear().green,
+            color.to_linear().blue,
+            1.0,
+        ),
+    );
     color_gradient.add_key(1.0, Vec4::splat(0.0));
 
     let writer = ExprWriter::new();
@@ -108,7 +96,7 @@ fn setup(
         RenderLayers::layer(0),
         RenderLayers::layer(0).with(2),
         RenderLayers::layer(1).with(2),
-        RenderLayers::all(),
+        RenderLayers::from_layers(&[0, 1, 2, 3]),
     ];
 
     // Spawn 4 cameras in grid, "4-player couch co-op"-style
@@ -120,9 +108,6 @@ fn setup(
                 camera: Camera {
                     // Have a different order for each camera to ensure determinism
                     order: i as isize,
-                    ..default()
-                },
-                camera_3d: Camera3d {
                     // Only clear render target from first camera, others additively render on same
                     // target
                     clear_color: if i == 0 {
@@ -140,43 +125,49 @@ fn setup(
             SplitCamera {
                 pos: UVec2::new(i as u32 % 2, i as u32 / 2),
             },
-            *layer,
+            layer.clone(),
         ));
     }
 
-    commands.spawn(DirectionalLightBundle {
-        directional_light: DirectionalLight {
-            color: Color::WHITE,
-            // Crank the illuminance way (too) high to make the reference cube clearly visible
-            illuminance: 100000.,
-            shadows_enabled: false,
+    commands.spawn((
+        DirectionalLightBundle {
+            directional_light: DirectionalLight {
+                color: Color::WHITE,
+                // Crank the illuminance way (too) high to make the reference cube clearly visible
+                illuminance: 100000.,
+                shadows_enabled: false,
+                ..Default::default()
+            },
+            transform: Transform::from_rotation(Quat::from_euler(EulerRot::ZYX, 1.7, 2.4, 0.)),
             ..Default::default()
         },
-        transform: Transform::from_rotation(Quat::from_euler(EulerRot::ZYX, 1.7, 2.4, 0.)),
-        ..Default::default()
+        // The light affects all the views
+        RenderLayers::from_layers(&[0, 1, 2, 3]),
+    ));
+
+    let cube = meshes.add(Cuboid {
+        half_size: Vec3::splat(0.5),
     });
+    let plane = meshes.add(Rectangle {
+        half_size: Vec2::splat(200.0),
+    });
+    let mat = materials.add(utils::COLOR_PURPLE);
+    let ground_mat = materials.add(utils::COLOR_OLIVE);
 
-    let cube = meshes.add(Mesh::from(Cube { size: 1.0 }));
-    let plane = meshes.add(Mesh::from(Plane {
-        size: 200.0,
-        ..default()
-    }));
-    let mat = materials.add(Color::PURPLE.into());
-    let ground_mat = materials.add(Color::OLIVE.into());
-
-    let effect1 = effects.add(make_effect(Color::RED));
+    let effect1 = effects.add(make_effect(utils::COLOR_RED));
 
     // Ground plane to make it easier to see the different cameras
     commands.spawn((
         PbrBundle {
             transform: Transform::from_translation(Vec3::Y * -20.)
-                * Transform::from_scale(Vec3::new(0.4, 1., 1.)),
+                * Transform::from_scale(Vec3::new(0.4, 1., 1.))
+                * Transform::from_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
             mesh: plane,
             material: ground_mat,
             ..Default::default()
         },
         Name::new("ground"),
-        RenderLayers::all(),
+        RenderLayers::from_layers(&[0, 1, 2, 3]),
     ));
 
     commands
@@ -202,7 +193,7 @@ fn setup(
             ));
         });
 
-    let effect2 = effects.add(make_effect(Color::GREEN));
+    let effect2 = effects.add(make_effect(utils::COLOR_GREEN));
 
     commands
         .spawn((
@@ -227,7 +218,7 @@ fn setup(
             ));
         });
 
-    let effect3 = effects.add(make_effect(Color::BLUE));
+    let effect3 = effects.add(make_effect(utils::COLOR_BLUE));
 
     commands
         .spawn((

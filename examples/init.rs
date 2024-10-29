@@ -7,53 +7,21 @@
 
 use std::f32::consts::PI;
 
-use bevy::{
-    core_pipeline::tonemapping::Tonemapping,
-    log::LogPlugin,
-    prelude::*,
-    render::{
-        mesh::shape::Cube, render_resource::WgpuFeatures, settings::WgpuSettings, RenderPlugin,
-    },
-};
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
-
+use bevy::{core_pipeline::tonemapping::Tonemapping, prelude::*};
 use bevy_hanabi::prelude::*;
+
+mod utils;
+use utils::*;
 
 #[derive(Component)]
 struct RotateSpeed(pub f32);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut wgpu_settings = WgpuSettings::default();
-    wgpu_settings
-        .features
-        .set(WgpuFeatures::VERTEX_WRITABLE_STORAGE, true);
-
-    App::default()
-        .insert_resource(ClearColor(Color::DARK_GRAY))
-        .add_plugins(
-            DefaultPlugins
-                .set(LogPlugin {
-                    level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,init=trace".to_string(),
-                })
-                .set(RenderPlugin {
-                    render_creation: wgpu_settings.into(),
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "🎆 Hanabi — init".to_string(),
-                        ..default()
-                    }),
-                    ..default()
-                }),
-        )
-        .add_plugins(HanabiPlugin)
-        .add_plugins(WorldInspectorPlugin::default())
+    let app_exit = utils::make_test_app("init")
         .add_systems(Startup, setup)
-        .add_systems(Update, (bevy::window::close_on_esc, rotate_effect))
+        .add_systems(Update, rotate_effect)
         .run();
-
-    Ok(())
+    app_exit.into_result()
 }
 
 const COLOR: Vec4 = Vec4::new(0.7, 0.7, 1.0, 1.0);
@@ -61,7 +29,7 @@ const SIZE: Vec2 = Vec2::splat(0.1);
 
 fn base_effect<M, F>(name: impl Into<String>, mut make_modifier: F) -> EffectAsset
 where
-    M: InitModifier + Send + Sync + 'static,
+    M: Modifier + Send + Sync + 'static,
     F: FnMut(&ExprWriter) -> M,
 {
     let writer = ExprWriter::new();
@@ -76,10 +44,7 @@ where
         .render(SetColorModifier {
             color: COLOR.into(),
         })
-        .render(SetSizeModifier {
-            size: SIZE.into(),
-            screen_space_size: false,
-        })
+        .render(SetSizeModifier { size: SIZE.into() })
 }
 
 fn spawn_effect(
@@ -94,9 +59,7 @@ fn spawn_effect(
     commands
         .spawn((
             Name::new(format!("{}_parent", name)),
-            PbrBundle {
-                mesh: mesh.clone(),
-                material: material.clone(),
+            SpatialBundle {
                 transform,
                 ..Default::default()
             },
@@ -140,15 +103,17 @@ fn setup(
         directional_light: DirectionalLight {
             color: Color::WHITE,
             // Crank the illuminance way (too) high to make the reference cube clearly visible
-            illuminance: 100000.,
+            illuminance: 1000.,
             shadows_enabled: false,
             ..Default::default()
         },
         ..Default::default()
     });
 
-    let cube = meshes.add(Mesh::from(Cube { size: 0.1 }));
-    let mat = materials.add(Color::PURPLE.into());
+    let cube = meshes.add(Cuboid {
+        half_size: Vec3::splat(0.5),
+    });
+    let mat = materials.add(utils::COLOR_PURPLE);
 
     spawn_effect(
         &mut commands,
@@ -170,7 +135,7 @@ fn setup(
     spawn_effect(
         &mut commands,
         "SetPositionSphereModifier".to_string(),
-        1.,
+        3.,
         Transform::from_translation(Vec3::new(0., 0., 0.)),
         effects.add(base_effect("SetPositionSphereModifier", |writer| {
             SetPositionSphereModifier {
@@ -186,7 +151,7 @@ fn setup(
     spawn_effect(
         &mut commands,
         "SetPositionCone3dModifier".to_string(),
-        -5.,
+        3.,
         Transform::from_translation(Vec3::new(20., 0., 0.)),
         effects.add(base_effect("SetPositionCone3dModifier", |writer| {
             SetPositionCone3dModifier {

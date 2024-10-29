@@ -8,8 +8,8 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    calc_func_id, graph::ExprError, impl_mod_init_update, modifier::ShapeDimension, Attribute,
-    EvalContext, ExprHandle, InitContext, InitModifier, Module, UpdateContext, UpdateModifier,
+    calc_func_id, graph::ExprError, modifier::ShapeDimension, Attribute, BoxedModifier,
+    EvalContext, ExprHandle, Modifier, ModifierContext, Module, ShaderWriter,
 };
 
 /// A modifier to set the position of particles on or inside a circle/disc,
@@ -39,16 +39,14 @@ pub struct SetPositionCircleModifier {
     /// Note the particular interpretation of the dimension for this shape,
     /// which unlike other shapes is a 2D one to begin with:
     /// - [`ShapeDimension::Volume`] randomly position the particle anywhere on
-    /// the "volume" of the shape, which here is understood to be the 2D disc
-    /// surface including its origin (`dist <= r`).
-    /// - [`ShapeDimension::Surface`] randomly position the particle
-    /// anywhere on the "surface" of the shape, which here is understood to
-    /// be the perimeter circle, the set of points at a distance from the center
-    /// exactly equal to the radius (`dist == r`).
+    ///   the "volume" of the shape, which here is understood to be the 2D disc
+    ///   surface including its origin (`dist <= r`).
+    /// - [`ShapeDimension::Surface`] randomly position the particle anywhere on
+    ///   the "surface" of the shape, which here is understood to be the
+    ///   perimeter circle, the set of points at a distance from the center
+    ///   exactly equal to the radius (`dist == r`).
     pub dimension: ShapeDimension,
 }
-
-impl_mod_init_update!(SetPositionCircleModifier, &[Attribute::POSITION]);
 
 impl SetPositionCircleModifier {
     fn eval(
@@ -110,24 +108,23 @@ impl SetPositionCircleModifier {
     }
 }
 
-#[typetag::serde]
-impl InitModifier for SetPositionCircleModifier {
-    fn apply_init(&self, module: &mut Module, context: &mut InitContext) -> Result<(), ExprError> {
-        let code = self.eval(module, context)?;
-        context.init_code += &code;
-        Ok(())
+#[cfg_attr(feature = "serde", typetag::serde)]
+impl Modifier for SetPositionCircleModifier {
+    fn context(&self) -> ModifierContext {
+        ModifierContext::Init | ModifierContext::Update
     }
-}
 
-#[typetag::serde]
-impl UpdateModifier for SetPositionCircleModifier {
-    fn apply_update(
-        &self,
-        module: &mut Module,
-        context: &mut UpdateContext,
-    ) -> Result<(), ExprError> {
+    fn attributes(&self) -> &[Attribute] {
+        &[Attribute::POSITION]
+    }
+
+    fn boxed_clone(&self) -> BoxedModifier {
+        Box::new(*self)
+    }
+
+    fn apply(&self, module: &mut Module, context: &mut ShaderWriter) -> Result<(), ExprError> {
         let code = self.eval(module, context)?;
-        context.update_code += &code;
+        context.main_code += &code;
         Ok(())
     }
 }
@@ -151,8 +148,6 @@ pub struct SetPositionSphereModifier {
     /// The shape dimension to set the position to.
     pub dimension: ShapeDimension,
 }
-
-impl_mod_init_update!(SetPositionSphereModifier, &[Attribute::POSITION]);
 
 impl SetPositionSphereModifier {
     fn eval(
@@ -216,24 +211,23 @@ impl SetPositionSphereModifier {
     }
 }
 
-#[typetag::serde]
-impl InitModifier for SetPositionSphereModifier {
-    fn apply_init(&self, module: &mut Module, context: &mut InitContext) -> Result<(), ExprError> {
-        let code = self.eval(module, context)?;
-        context.init_code += &code;
-        Ok(())
+#[cfg_attr(feature = "serde", typetag::serde)]
+impl Modifier for SetPositionSphereModifier {
+    fn context(&self) -> ModifierContext {
+        ModifierContext::Init | ModifierContext::Update
     }
-}
 
-#[typetag::serde]
-impl UpdateModifier for SetPositionSphereModifier {
-    fn apply_update(
-        &self,
-        module: &mut Module,
-        context: &mut UpdateContext,
-    ) -> Result<(), ExprError> {
+    fn attributes(&self) -> &[Attribute] {
+        &[Attribute::POSITION]
+    }
+
+    fn boxed_clone(&self) -> BoxedModifier {
+        Box::new(*self)
+    }
+
+    fn apply(&self, module: &mut Module, context: &mut ShaderWriter) -> Result<(), ExprError> {
         let code = self.eval(module, context)?;
-        context.update_code += &code;
+        context.main_code += &code;
         Ok(())
     }
 }
@@ -270,8 +264,6 @@ pub struct SetPositionCone3dModifier {
     /// The shape dimension to set the position to.
     pub dimension: ShapeDimension,
 }
-
-impl_mod_init_update!(SetPositionCone3dModifier, &[Attribute::POSITION]);
 
 impl SetPositionCone3dModifier {
     fn eval(
@@ -334,24 +326,23 @@ impl SetPositionCone3dModifier {
     }
 }
 
-#[typetag::serde]
-impl InitModifier for SetPositionCone3dModifier {
-    fn apply_init(&self, module: &mut Module, context: &mut InitContext) -> Result<(), ExprError> {
-        let code = self.eval(module, context)?;
-        context.init_code += &code;
-        Ok(())
+#[cfg_attr(feature = "serde", typetag::serde)]
+impl Modifier for SetPositionCone3dModifier {
+    fn context(&self) -> ModifierContext {
+        ModifierContext::Init | ModifierContext::Update
     }
-}
 
-#[typetag::serde]
-impl UpdateModifier for SetPositionCone3dModifier {
-    fn apply_update(
-        &self,
-        module: &mut Module,
-        context: &mut UpdateContext,
-    ) -> Result<(), ExprError> {
+    fn attributes(&self) -> &[Attribute] {
+        &[Attribute::POSITION]
+    }
+
+    fn boxed_clone(&self) -> BoxedModifier {
+        Box::new(*self)
+    }
+
+    fn apply(&self, module: &mut Module, context: &mut ShaderWriter) -> Result<(), ExprError> {
         let code = self.eval(module, context)?;
-        context.update_code += &code;
+        context.main_code += &code;
         Ok(())
     }
 }

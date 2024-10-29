@@ -7,52 +7,21 @@
 
 use bevy::{
     core_pipeline::tonemapping::Tonemapping,
-    log::LogPlugin,
     math::Vec3Swizzles,
     prelude::*,
-    render::{
-        camera::{Projection, ScalingMode},
-        render_resource::WgpuFeatures,
-        settings::WgpuSettings,
-        RenderPlugin,
-    },
+    render::camera::{Projection, ScalingMode},
 };
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
-
 use bevy_hanabi::prelude::*;
 
+mod utils;
+use utils::*;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut wgpu_settings = WgpuSettings::default();
-    wgpu_settings
-        .features
-        .set(WgpuFeatures::VERTEX_WRITABLE_STORAGE, true);
-
-    App::default()
-        .insert_resource(ClearColor(Color::DARK_GRAY))
-        .add_plugins(
-            DefaultPlugins
-                .set(LogPlugin {
-                    level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,spawn_on_command=trace".to_string(),
-                })
-                .set(RenderPlugin {
-                    render_creation: wgpu_settings.into(),
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "🎆 Hanabi — spawn on command".to_string(),
-                        ..default()
-                    }),
-                    ..default()
-                }),
-        )
-        .add_plugins(HanabiPlugin)
-        .add_plugins(WorldInspectorPlugin::default())
+    let app_exit = utils::make_test_app("spawn_on_command")
         .add_systems(Startup, setup)
-        .add_systems(Update, (bevy::window::close_on_esc, update))
+        .add_systems(Update, update)
         .run();
-
-    Ok(())
+    app_exit.into_result()
 }
 
 #[derive(Component)]
@@ -82,12 +51,11 @@ fn setup(
 
     commands
         .spawn(PbrBundle {
-            mesh: meshes.add(Mesh::from(shape::Quad {
-                size: Vec2::splat(BOX_SIZE),
-                ..Default::default()
-            })),
+            mesh: meshes.add(Rectangle {
+                half_size: Vec2::splat(BOX_SIZE / 2.),
+            }),
             material: materials.add(StandardMaterial {
-                base_color: Color::BLACK,
+                base_color: Color::linear_rgb(0.05, 0.05, 0.05),
                 unlit: true,
                 ..Default::default()
             }),
@@ -97,9 +65,7 @@ fn setup(
 
     commands
         .spawn(PbrBundle {
-            mesh: meshes.add(Mesh::from(shape::UVSphere {
-                sectors: 32,
-                stacks: 2,
+            mesh: meshes.add(Mesh::from(Sphere {
                 radius: BALL_RADIUS,
             })),
             material: materials.add(StandardMaterial {
@@ -135,10 +101,12 @@ fn setup(
     // when the particle spawns. The particle will keep that color afterward,
     // even if the property changes, because the color will be saved
     // per-particle (due to the Attribute::COLOR).
-    let color = writer.prop("spawn_color").expr();
+    let spawn_color = writer.add_property("spawn_color", 0xFFFFFFFFu32.into());
+    let color = writer.prop(spawn_color).expr();
     let init_color = SetAttributeModifier::new(Attribute::COLOR, color);
 
-    let normal = writer.prop("normal");
+    let normal = writer.add_property("normal", Vec3::ZERO.into());
+    let normal = writer.prop(normal);
 
     // Set the position to be the collision point, which in this example is always
     // the emitter position (0,0,0) at the ball center, minus the ball radius
@@ -167,8 +135,6 @@ fn setup(
     let effect = effects.add(
         EffectAsset::new(32768, spawner, writer.finish())
             .with_name("spawn_on_command")
-            .with_property("spawn_color", 0xFFFFFFFFu32.into())
-            .with_property("normal", Vec3::ZERO.into())
             .init(init_pos)
             .init(init_vel)
             .init(init_age)
@@ -178,28 +144,33 @@ fn setup(
             // Set a size of 3 (logical) pixels, constant in screen space, independent of projection
             .render(SetSizeModifier {
                 size: Vec2::splat(3.).into(),
-                screen_space_size: true,
-            }),
+            })
+            .render(ScreenSpaceSizeModifier),
     );
 
     commands
-        .spawn((
-            ParticleEffectBundle::new(effect).with_spawner(spawner),
-            EffectProperties::default(),
-        ))
+        .spawn(ParticleEffectBundle::new(effect))
         .insert(Name::new("effect"));
 }
 
 fn update(
     mut balls: Query<(&mut Ball, &mut Transform)>,
-    mut effect: Query<(&mut EffectProperties, &mut EffectSpawner, &mut Transform), Without<Ball>>,
+    mut effect: Query<
+        (
+            &mut EffectProperties,
+            &mut EffectInitializers,
+            &mut Transform,
+        ),
+        Without<Ball>,
+    >,
     time: Res<Time>,
 ) {
     const HALF_SIZE: f32 = BOX_SIZE / 2.0 - BALL_RADIUS;
 
     // Note: On first frame where the effect spawns, EffectSpawner is spawned during
     // PostUpdate, so will not be available yet. Ignore for a frame if so.
-    let Ok((mut properties, mut spawner, mut effect_transform)) = effect.get_single_mut() else {
+    let Ok((mut properties, mut initializers, mut effect_transform)) = effect.get_single_mut()
+    else {
         return;
     };
 
@@ -247,7 +218,7 @@ fn update(
             properties.set("normal", normal.extend(0.).into());
 
             // Spawn the particles
-            spawner.reset();
+            initializers.reset();
         }
     }
 }

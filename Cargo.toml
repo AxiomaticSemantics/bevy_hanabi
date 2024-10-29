@@ -1,6 +1,6 @@
 [package]
 name = "bevy_hanabi"
-version = "0.10.0-dev"
+version = "0.13.0-dev"
 authors = ["Jerome Humbert <djeedai@gmail.com>"]
 edition = "2021"
 description = "Hanabi GPU particle system for the Bevy game engine"
@@ -10,11 +10,11 @@ documentation = "https://docs.rs/bevy_hanabi"
 keywords = ["bevy", "particle-system", "particles", "vfx"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-exclude = ["examples/*.gif", "examples/*.png", ".github", "release.md", "run_examples.bat", "run_examples.sh", "deny.toml"]
+exclude = ["docs/*.svg", "docs/*.png", "examples/*.gif", "examples/*.png", ".github", "release.md", "run_examples.bat", "run_examples.sh", "deny.toml"]
 autoexamples = false
 
 [features]
-default = ["2d", "3d", "gpu_tests"]
+default = ["2d", "3d", "serde", "gpu_tests", "examples_world_inspector"]
 
 # Enable support for rendering through a 2D camera (Camera2dBundle)
 2d = []
@@ -22,13 +22,29 @@ default = ["2d", "3d", "gpu_tests"]
 # Enable support for rendering through a 3D camera (Camera3dBundle)
 3d = []
 
+# Enable serializing and deserializing of assets. This doesn't work on WASM,
+# because typetag is not available for the wasm target.
+serde = ["typetag"]
+
+# Enable tracing annotations
+trace = []
+
 # Special feature to enable GPU-based tests, which otherwise fail
 # on a CI machine without a graphic adapter or without proper drivers.
 # This is a testing-only feature, which has no effect on the build.
 gpu_tests = []
 
+# Enable world inspector in examples, via bevy-inspector-egui.
+# This has no effect on the crate itself, only affects examples.
+# Unfortunately cargo doesn't allow example-only features.
+# We don't force a dependency on the bevy-inspector-egui crate because:
+# 1. dev-dependencies cannot be optional
+# 2. there's a bunch of duplicate deps and dodgy licenses pulled
+examples_world_inspector = []
+
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
+fixedbitset = "0.5"
 copyless = "0.1"
 rand = "0.8"
 rand_pcg = "0.3"
@@ -36,14 +52,14 @@ serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0"
 ron = "0.8"
 bitflags = "2.3"
-typetag = "0.2"
+typetag = { version = "0.2", optional = true }
 thiserror = "1.0"
-# Same versions as Bevy 0.12 (bevy_render)
-naga = "0.13"
-naga_oil = "0.10"
+# Same versions as Bevy 0.14 (bevy_render)
+naga = "0.20"
+naga_oil = { version = "0.14", default-features = false, features = ["test_shader"] }
 
 [dependencies.bevy]
-version = "0.12"
+version = "0.14"
 default-features = false
 features = [ "bevy_core_pipeline", "bevy_render", "bevy_asset", "x11" ]
 
@@ -51,14 +67,20 @@ features = [ "bevy_core_pipeline", "bevy_render", "bevy_asset", "x11" ]
 all-features = true
 
 [dev-dependencies]
-# Same versions as Bevy 0.12 (bevy_render)
-wgpu = "0.17.1"
+# Same versions as Bevy 0.14 (bevy_render)
+wgpu = "0.20"
+
+# For world inspector; required if "examples_world_inspector" is used.
+bevy-inspector-egui = "0.25"
+bevy_egui = { version = "0.28", default-features = false, features = [
+    "manage_clipboard", "open_url"
+] }
+egui = "0.28"
 
 # For procedural texture generation in examples
-noise = "0.8"
+noise = "0.9"
 
 futures = "0.3"
-bevy-inspector-egui = "0.21"
 
 [[example]]
 name = "firework"
@@ -94,7 +116,7 @@ required-features = [ "bevy/bevy_winit", "bevy/bevy_pbr", "3d" ]
 
 [[example]]
 name = "activate"
-required-features = [ "bevy/bevy_winit", "bevy/bevy_pbr", "3d" ]
+required-features = [ "bevy/bevy_winit", "bevy/bevy_pbr", "bevy/bevy_ui", "bevy/default_font", "3d" ]
 
 [[example]]
 name = "force_field"
@@ -110,7 +132,7 @@ required-features = [ "bevy/bevy_winit", "bevy/bevy_pbr", "3d" ]
 
 [[example]]
 name = "instancing"
-required-features = [ "bevy/bevy_winit", "bevy/bevy_pbr", "3d" ]
+required-features = [ "bevy/bevy_winit", "bevy/bevy_pbr", "bevy/png", "3d" ]
 
 [[example]]
 name = "gradient"
@@ -127,6 +149,23 @@ required-features = [ "bevy/bevy_winit", "bevy/bevy_pbr", "bevy/png", "3d" ]
 [[example]]
 name = "2d"
 required-features = [ "bevy/bevy_winit", "bevy/bevy_sprite", "2d" ]
+
+[[example]]
+name = "worms"
+required-features = [ "bevy/bevy_winit", "bevy/bevy_pbr", "bevy/png", "3d" ]
+
+[[example]]
+name = "ribbon"
+required-features = [ "bevy/bevy_winit", "bevy/bevy_pbr", "3d" ]
+
+[[example]]
+name = "ordering"
+required-features = [ "bevy/bevy_winit", "bevy/bevy_pbr", "3d" ]
+
+[[test]]
+name = "empty_effect"
+path = "gpu_tests/empty_effect.rs"
+harness = false
 
 [workspace]
 resolver = "2"

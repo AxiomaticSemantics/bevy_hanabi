@@ -5,49 +5,21 @@
 //! particle above or below the reference square.
 
 use bevy::{
-    log::LogPlugin,
     prelude::*,
-    render::{
-        camera::ScalingMode, render_resource::WgpuFeatures, settings::WgpuSettings, RenderPlugin,
-    },
+    render::camera::ScalingMode,
     sprite::{MaterialMesh2dBundle, Mesh2dHandle},
 };
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
-
 use bevy_hanabi::prelude::*;
 
+mod utils;
+use utils::*;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut wgpu_settings = WgpuSettings::default();
-    wgpu_settings
-        .features
-        .set(WgpuFeatures::VERTEX_WRITABLE_STORAGE, true);
-
-    App::default()
-        .insert_resource(ClearColor(Color::DARK_GRAY))
-        .add_plugins(
-            DefaultPlugins
-                .set(LogPlugin {
-                    level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,2d=trace".to_string(),
-                })
-                .set(RenderPlugin {
-                    render_creation: wgpu_settings.into(),
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "🎆 Hanabi — 2d".to_string(),
-                        ..default()
-                    }),
-                    ..default()
-                }),
-        )
-        .add_plugins(HanabiPlugin)
-        .add_plugins(WorldInspectorPlugin::default())
+    let app_exit = utils::make_test_app("2d")
         .add_systems(Startup, setup)
-        .add_systems(Update, (bevy::window::close_on_esc, update_plane))
+        .add_systems(Update, update_plane)
         .run();
-
-    Ok(())
+    app_exit.into_result()
 }
 
 fn setup(
@@ -66,10 +38,9 @@ fn setup(
     commands
         .spawn(MaterialMesh2dBundle {
             mesh: meshes
-                .add(Mesh::from(shape::Quad {
-                    size: Vec2::splat(0.2),
-                    ..Default::default()
-                }))
+                .add(Rectangle {
+                    half_size: Vec2::splat(0.1),
+                })
                 .into(),
             material: materials.add(ColorMaterial {
                 color: Color::WHITE,
@@ -105,12 +76,16 @@ fn setup(
         speed: writer.lit(0.1).expr(),
     };
 
+    let mut module = writer.finish();
+
+    let round = RoundModifier::constant(&mut module, 2.0 / 3.0);
+
     // Create a new effect asset spawning 30 particles per second from a circle
     // and slowly fading from blue-ish to transparent over their lifetime.
     // By default the asset spawns the particles at Z=0.
     let spawner = Spawner::rate(30.0.into());
     let effect = effects.add(
-        EffectAsset::new(4096, spawner, writer.finish())
+        EffectAsset::new(4096, spawner, module)
             .with_name("2d")
             .init(init_pos)
             .init(init_vel)
@@ -120,7 +95,8 @@ fn setup(
                 gradient: Gradient::constant(Vec2::splat(0.02)),
                 screen_space_size: false,
             })
-            .render(ColorOverLifetimeModifier { gradient }),
+            .render(ColorOverLifetimeModifier { gradient })
+            .render(round),
     );
 
     // Spawn an instance of the particle effect, and override its Z layer to

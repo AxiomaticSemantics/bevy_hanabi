@@ -9,17 +9,18 @@
 
 #![allow(dead_code)]
 
-use bevy::{
-    core_pipeline::tonemapping::Tonemapping, log::LogPlugin, prelude::*, render::mesh::shape::Cube,
-};
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy::{core_pipeline::tonemapping::Tonemapping, prelude::*};
+use bevy_hanabi::prelude::*;
 use rand::Rng;
 
-use bevy_hanabi::prelude::*;
+mod utils;
+use utils::*;
 
 #[derive(Default, Resource)]
 struct InstanceManager {
     effect: Handle<EffectAsset>,
+    alt_effect: Handle<EffectAsset>,
+    texture: Handle<Image>,
     mesh: Handle<Mesh>,
     material: Handle<StandardMaterial>,
     instances: Vec<Option<Entity>>,
@@ -36,6 +37,8 @@ impl InstanceManager {
         instances.resize(count, None);
         Self {
             effect: default(),
+            alt_effect: default(),
+            texture: default(),
             mesh: default(),
             material: default(),
             instances,
@@ -56,7 +59,7 @@ impl InstanceManager {
     /// determines both the position in the global effect array and the
     /// associated 2D grid position. If a particle effect already exists at this
     /// index / grid position, the call is ignored.
-    pub fn spawn_index(&mut self, index: i32, commands: &mut Commands) {
+    pub fn spawn_index(&mut self, index: i32, commands: &mut Commands, alt: bool) {
         if self.count >= self.instances.len() {
             return;
         }
@@ -79,13 +82,22 @@ impl InstanceManager {
                 .spawn((
                     Name::new(format!("{:?}", pos)),
                     ParticleEffectBundle {
-                        effect: ParticleEffect::new(self.effect.clone()),
+                        effect: ParticleEffect::new(if alt {
+                            self.alt_effect.clone()
+                        } else {
+                            self.effect.clone()
+                        }),
                         transform: Transform::from_translation(Vec3::new(
                             pos.x as f32 * 10.,
                             pos.y as f32 * 10.,
                             0.,
                         )),
                         ..Default::default()
+                    },
+                    // Only used if alt_effect, but just simpler to add all the time for this
+                    // example only.
+                    EffectMaterial {
+                        images: vec![self.texture.clone()],
                     },
                 ))
                 .with_children(|p| {
@@ -107,7 +119,7 @@ impl InstanceManager {
 
     /// Spawn a particle effect at a random free position in the grid. The
     /// effect is always spawned, unless the grid is full.
-    pub fn spawn_random(&mut self, commands: &mut Commands) {
+    pub fn spawn_random(&mut self, commands: &mut Commands, alt: bool) {
         if self.count >= self.instances.len() {
             return;
         }
@@ -122,7 +134,7 @@ impl InstanceManager {
             .filter(|(_, entity)| entity.is_none())
             .nth(index)
             .unwrap();
-        self.spawn_index(index as i32, commands);
+        self.spawn_index(index as i32, commands, alt);
     }
 
     /// Despawn the n-th existing particle effect.
@@ -169,29 +181,14 @@ impl InstanceManager {
     }
 }
 
-fn main() {
-    App::default()
-        .add_plugins(
-            DefaultPlugins
-                .set(LogPlugin {
-                    level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,instancing=trace".to_string(),
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "🎆 Hanabi — instancing".to_string(),
-                        ..default()
-                    }),
-                    ..default()
-                }),
-        )
-        .add_plugins(HanabiPlugin)
-        .add_plugins(WorldInspectorPlugin::default())
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let app_exit = utils::make_test_app("instancing")
         .insert_resource(InstanceManager::new(5, 4))
         .add_systems(Startup, setup)
-        .add_systems(Update, (bevy::window::close_on_esc, keyboard_input_system))
+        .add_systems(Update, keyboard_input_system)
         //.add_system(stress_test.after(keyboard_input_system))
         .run();
+    app_exit.into_result()
 }
 
 fn setup(
@@ -200,6 +197,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut my_effect: ResMut<InstanceManager>,
+    asset_server: Res<AssetServer>,
 ) {
     info!("Usage: Press the SPACE key to spawn more instances, and the DELETE key to remove an existing instance.");
 
@@ -221,8 +219,10 @@ fn setup(
         ..Default::default()
     });
 
-    let mesh = meshes.add(Mesh::from(Cube { size: 1.0 }));
-    let mat = materials.add(Color::PURPLE.into());
+    let mesh = meshes.add(Cuboid {
+        half_size: Vec3::splat(0.5),
+    });
+    let mat = materials.add(utils::COLOR_PURPLE);
 
     let mut gradient = Gradient::new();
     gradient.add_key(0.0, Vec4::new(0.0, 0.0, 1.0, 1.0));
@@ -257,28 +257,75 @@ fn setup(
             .render(ColorOverLifetimeModifier { gradient }),
     );
 
-    // Store the effect for later reference
-    my_effect.effect = effect.clone();
-    my_effect.mesh = mesh.clone();
-    my_effect.material = mat.clone();
+    let mut gradient = Gradient::new();
+    gradient.add_key(0.0, Vec4::new(1., 0., 0., 0.));
+    gradient.add_key(0.1, Vec4::new(1., 0., 0., 1.));
+    gradient.add_key(1.0, Vec4::new(1., 0., 0., 0.));
+
+    let writer = ExprWriter::new();
+
+    let lifetime = writer.lit(5.).expr();
+    let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
+
+    let init_pos = SetPositionSphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        radius: writer.lit(7.).expr(),
+        dimension: ShapeDimension::Volume,
+    };
+
+    let init_vel = SetVelocityTangentModifier {
+        origin: writer.lit(Vec3::ZERO).expr(),
+        axis: writer.lit(Vec3::Z).expr(),
+        speed: writer.lit(4.).expr(),
+    };
+
+    let radial_accel =
+        RadialAccelModifier::new(writer.lit(Vec3::ZERO).expr(), writer.lit(-3).expr());
+
+    let texture_slot = writer.lit(0u32).expr();
+
+    let mut module = writer.finish();
+    module.add_texture("color");
+
+    let alt_effect = effects.add(
+        EffectAsset::new(512, Spawner::rate(102.0.into()), module)
+            .with_simulation_space(SimulationSpace::Local)
+            .with_name("alternate instancing")
+            .init(init_pos)
+            .init(init_vel)
+            .init(init_lifetime)
+            .update(radial_accel)
+            .render(ParticleTextureModifier {
+                texture_slot,
+                sample_mapping: ImageSampleMapping::Modulate,
+            })
+            .render(ColorOverLifetimeModifier { gradient }),
+    );
+
+    // Store the effects for later reference
+    my_effect.effect = effect;
+    my_effect.alt_effect = alt_effect;
+    my_effect.texture = asset_server.load("circle.png");
+    my_effect.mesh = mesh;
+    my_effect.material = mat;
 
     // Spawn a few effects as example; others can be added/removed with keyboard
-    for _ in 0..45 {
-        my_effect.spawn_random(&mut commands);
+    for i in 0..45 {
+        my_effect.spawn_random(&mut commands, (i % 15) == 14);
     }
 }
 
 fn keyboard_input_system(
-    keyboard_input: Res<Input<KeyCode>>,
+    keyboard_input: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
     mut my_effect: ResMut<InstanceManager>,
 ) {
     my_effect.frame += 1;
 
     if keyboard_input.just_pressed(KeyCode::Space) {
-        my_effect.spawn_random(&mut commands);
+        my_effect.spawn_random(&mut commands, keyboard_input.pressed(KeyCode::ShiftLeft));
     } else if keyboard_input.just_pressed(KeyCode::Delete)
-        || keyboard_input.just_pressed(KeyCode::Back)
+        || keyboard_input.just_pressed(KeyCode::Backspace)
     {
         my_effect.despawn_random(&mut commands);
     }
@@ -297,7 +344,7 @@ fn stress_test(mut commands: Commands, mut my_effect: ResMut<InstanceManager>) {
     if r < 0.45 {
         let spawn_count = (r * 10.) as i32 + 1;
         for _ in 0..spawn_count {
-            my_effect.spawn_random(&mut commands);
+            my_effect.spawn_random(&mut commands, false);
         }
     } else if r < 0.9 {
         let despawn_count = ((r - 0.45) * 10.) as i32 + 1;

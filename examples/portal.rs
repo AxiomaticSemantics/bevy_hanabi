@@ -12,39 +12,19 @@
 //! before they disappear, like sparkles fading away.
 
 use bevy::{
-    core_pipeline::{
-        bloom::BloomSettings, clear_color::ClearColorConfig, tonemapping::Tonemapping,
-    },
-    log::LogPlugin,
+    core_pipeline::{bloom::BloomSettings, tonemapping::Tonemapping},
     prelude::*,
 };
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
-
 use bevy_hanabi::prelude::*;
 
+mod utils;
+use utils::*;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    App::default()
-        .add_plugins(
-            DefaultPlugins
-                .set(LogPlugin {
-                    level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,portal=trace".to_string(),
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "🎆 Hanabi — portal".to_string(),
-                        ..default()
-                    }),
-                    ..default()
-                }),
-        )
-        .add_systems(Update, bevy::window::close_on_esc)
-        .add_plugins(HanabiPlugin)
-        .add_plugins(WorldInspectorPlugin::default())
+    let app_exit = utils::make_test_app("portal")
         .add_systems(Startup, setup)
         .run();
-
-    Ok(())
+    app_exit.into_result()
 }
 
 fn setup(mut commands: Commands, mut effects: ResMut<Assets<EffectAsset>>) {
@@ -53,10 +33,7 @@ fn setup(mut commands: Commands, mut effects: ResMut<Assets<EffectAsset>>) {
             transform: Transform::from_translation(Vec3::new(0., 0., 25.)),
             camera: Camera {
                 hdr: true,
-                ..default()
-            },
-            camera_3d: Camera3d {
-                clear_color: ClearColorConfig::Custom(Color::BLACK),
+                clear_color: Color::BLACK.into(),
                 ..default()
             },
             tonemapping: Tonemapping::None,
@@ -100,7 +77,7 @@ fn setup(mut commands: Commands, mut effects: ResMut<Assets<EffectAsset>>) {
     let tangent_accel = TangentAccelModifier::constant(&mut module, Vec3::ZERO, Vec3::Z, 30.);
 
     let effect1 = effects.add(
-        EffectAsset::new(32768, Spawner::rate(5000.0.into()), module)
+        EffectAsset::new(16384, Spawner::rate(5000.0.into()), module)
             .with_name("portal")
             .init(init_pos)
             .init(init_age)

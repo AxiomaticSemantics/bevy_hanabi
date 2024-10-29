@@ -199,7 +199,7 @@ impl Slot {
 
     /// Link this output slot to an input slot.
     ///
-    /// # Panic
+    /// # Panics
     ///
     /// Panics if this slot's direction is `SlotDir::Input`.
     fn link_to(&mut self, input: SlotId) {
@@ -773,9 +773,8 @@ equal to one."
 mod tests {
     use bevy::prelude::*;
 
-    use crate::{EvalContext, InitContext, ParticleLayout, PropertyLayout};
-
     use super::*;
+    use crate::{EvalContext, ModifierContext, ParticleLayout, PropertyLayout, ShaderWriter};
 
     #[test]
     fn add() {
@@ -796,7 +795,8 @@ mod tests {
 
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut context = InitContext::new(&property_layout, &particle_layout);
+        let mut context =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
         let str = context.eval(&module, out).unwrap();
         assert_eq!(str, "(3.) + (2.)".to_string());
     }
@@ -819,7 +819,8 @@ mod tests {
         let out = outputs[0];
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut context = InitContext::new(&property_layout, &particle_layout);
+        let mut context =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
         let str = context.eval(&module, out).unwrap();
         assert_eq!(str, "(3.) - (2.)".to_string());
     }
@@ -842,7 +843,8 @@ mod tests {
         let out = outputs[0];
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut context = InitContext::new(&property_layout, &particle_layout);
+        let mut context =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
         let str = context.eval(&module, out).unwrap();
         assert_eq!(str, "(3.) * (2.)".to_string());
     }
@@ -865,7 +867,8 @@ mod tests {
         let out = outputs[0];
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut context = InitContext::new(&property_layout, &particle_layout);
+        let mut context =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
         let str = context.eval(&module, out).unwrap();
         assert_eq!(str, "(3.) / (2.)".to_string());
     }
@@ -885,7 +888,8 @@ mod tests {
         let out = outputs[0];
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut context = InitContext::new(&property_layout, &particle_layout);
+        let mut context =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
         let str = context.eval(&module, out).unwrap();
         assert_eq!(str, format!("particle.{}", Attribute::POSITION.name()));
     }
@@ -904,7 +908,8 @@ mod tests {
         assert_eq!(outputs.len(), 2);
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut context = InitContext::new(&property_layout, &particle_layout);
+        let mut context =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
         let str0 = context.eval(&module, outputs[0]).unwrap();
         let str1 = context.eval(&module, outputs[1]).unwrap();
         assert_eq!(str0, format!("sim_params.{}", BuiltInOperator::Time.name()));
@@ -928,7 +933,8 @@ mod tests {
         assert_eq!(outputs.len(), 1);
         let property_layout = PropertyLayout::default();
         let particle_layout = ParticleLayout::default();
-        let mut context = InitContext::new(&property_layout, &particle_layout);
+        let mut context =
+            ShaderWriter::new(ModifierContext::Update, &property_layout, &particle_layout);
         let str = context.eval(&module, outputs[0]).unwrap();
         assert_eq!(str, "normalize(vec3<f32>(1.,1.,1.))".to_string());
     }
